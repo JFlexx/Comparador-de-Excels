@@ -14,6 +14,14 @@ from comparator import (
     export_decision_template,
 )
 
+MODE_LABELS = {
+    "Comparar valores": "compare_values",
+    "Comparar fórmulas": "compare_formulas",
+    "Comparar resultados cacheados": "compare_cached_results",
+    "Comparar estilos": "compare_styles",
+    "Comparar comentarios": "compare_comments",
+}
+
 st.set_page_config(page_title="Comparador de Excels", layout="wide")
 st.title("📘 Comparador de libros Excel (multi-hoja)")
 st.caption(
@@ -26,11 +34,29 @@ with st.sidebar:
     ignore_case = st.checkbox("Ignorar mayúsculas/minúsculas", value=False)
     keep_spaces = st.checkbox("No recortar espacios", value=False)
     empty_string_is_value = st.checkbox("Distinguir '' y None", value=False)
+    selected_modes = st.multiselect(
+        "Qué comparar",
+        options=list(MODE_LABELS),
+        default=["Comparar valores"],
+        help=(
+            "Puedes combinar varios criterios. Los resultados cacheados solo existen "
+            "si el archivo fue recalculado y guardado por Excel u otra herramienta compatible."
+        ),
+    )
+
+if not selected_modes:
+    st.warning("Selecciona al menos un modo de comparación.")
+    st.stop()
+
+mode_flags = {field_name: False for field_name in MODE_LABELS.values()}
+for label in selected_modes:
+    mode_flags[MODE_LABELS[label]] = True
 
 options = CompareOptions(
     strip_strings=not keep_spaces,
     case_sensitive=not ignore_case,
     ignore_empty_string_vs_none=not empty_string_is_value,
+    **mode_flags,
 )
 
 col1, col2 = st.columns(2)
@@ -70,7 +96,7 @@ with web_tab:
     df = diffs_to_dataframe(diff.all_differences())
 
     if df.empty:
-        st.success("No hay diferencias entre las hojas comunes.")
+        st.success("No hay diferencias entre las hojas comunes con las opciones seleccionadas.")
     else:
         st.write("Edita la acción por fila para generar el libro combinado.")
         edited = st.data_editor(
@@ -86,6 +112,11 @@ with web_tab:
                 "column": st.column_config.NumberColumn(disabled=True),
                 "sheet": st.column_config.TextColumn(disabled=True),
                 "cell": st.column_config.TextColumn(disabled=True),
+                "difference_types": st.column_config.TextColumn(disabled=True),
+                "formula_a": st.column_config.TextColumn(disabled=True),
+                "formula_b": st.column_config.TextColumn(disabled=True),
+                "cached_value_a": st.column_config.TextColumn(disabled=True),
+                "cached_value_b": st.column_config.TextColumn(disabled=True),
                 "value_a": st.column_config.TextColumn(disabled=True),
                 "value_b": st.column_config.TextColumn(disabled=True),
             },
@@ -110,6 +141,12 @@ with excel_tab:
         "Flujo recomendado si quieres trabajar dentro de Excel: "
         "1) descarga plantilla de decisiones, 2) edítala en Excel, 3) súbela y genera resultado."
     )
+
+    if options.compare_cached_results:
+        st.caption(
+            "Los resultados cacheados dependen de que el archivo haya sido recalculado y guardado fuera de openpyxl; "
+            "si no existen, verás celdas vacías o None en esas columnas."
+        )
 
     template_name = st.text_input("Nombre plantilla", "decisiones.xlsx")
     template_path = temp_dir / template_name

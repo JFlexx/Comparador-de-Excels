@@ -12,11 +12,23 @@ from comparator import (
 )
 
 
+def _comparison_flags(selected_modes: list[str]) -> dict[str, bool]:
+    selected = set(selected_modes)
+    return {
+        "compare_values": "values" in selected,
+        "compare_formulas": "formulas" in selected,
+        "compare_cached_results": "cached_results" in selected,
+        "compare_styles": "styles" in selected,
+        "compare_comments": "comments" in selected,
+    }
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     options = CompareOptions(
         strip_strings=not args.keep_spaces,
         case_sensitive=not args.ignore_case,
         ignore_empty_string_vs_none=not args.empty_string_is_value,
+        **_comparison_flags(args.compare_mode or ["values"]),
     )
     diff = compare_workbooks(args.a, args.b, options=options)
 
@@ -68,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["use_a", "use_b", "manual"],
         default="use_b",
         help="Acción por defecto para cada diferencia",
+    )
+    compare.add_argument(
+        "--compare-mode",
+        action="append",
+        choices=["values", "formulas", "cached_results", "styles", "comments"],
+        default=None,
+        help=(
+            "Modo de comparación. Repite la opción para combinar varios criterios. "
+            "Por defecto solo compara values."
+        ),
     )
     compare.add_argument("--ignore-case", action="store_true", help="No distinguir mayúsculas/minúsculas")
     compare.add_argument("--keep-spaces", action="store_true", help="No recortar espacios en strings")
