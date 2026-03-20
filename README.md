@@ -21,8 +21,8 @@ Incluye **dos interfaces**:
   - ignorar mayúsculas/minúsculas,
   - recortar o no espacios,
   - tratar `""` y `None` como iguales o distintos.
-- Genera resultado combinado.
-- Copia opcional de hojas que existen solo en B.
+- Genera resultado combinado en cualquiera de las dos direcciones (A→B o B→A).
+- Copia opcional de hojas que existen solo en el libro origen elegido.
 
 ---
 
@@ -47,12 +47,12 @@ Luego abre la URL mostrada por Streamlit (normalmente `http://localhost:8501`).
 ### 1) Crear plantilla de decisiones
 
 ```bash
-python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --template decisiones.xlsx
+python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base a --template decisiones.xlsx
 ```
 
 Esto genera `decisiones.xlsx` con:
 - Hoja `Decisiones`: una fila por diferencia.
-- Columna `action` con lista desplegable (`use_a`, `use_b`, `manual`).
+- Columna `action` con lista desplegable (`use_a`, `use_b`, `manual`) y valor inicial alineado con la dirección elegida.
 - Columna `manual_value` para casos manuales.
 
 ### 2) Editar decisiones en Excel
@@ -61,9 +61,21 @@ Abre `decisiones.xlsx` en Excel y cambia acciones.
 
 ### 3) Generar libro combinado
 
+#### Traer cambios de B hacia A
+
 ```bash
-python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones.xlsx --output resultado.xlsx
+python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base a --template decisiones_b_hacia_a.xlsx
+python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones_b_hacia_a.xlsx --apply-onto a --output resultado_b_hacia_a.xlsx
 ```
+
+#### Traer cambios de A hacia B
+
+```bash
+python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base b --template decisiones_a_hacia_b.xlsx
+python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones_a_hacia_b.xlsx --apply-onto b --output resultado_a_hacia_b.xlsx
+```
+
+En la interfaz web (`streamlit run app.py`) ahora también puedes elegir visualmente la dirección del merge antes de generar el archivo final.
 
 ---
 

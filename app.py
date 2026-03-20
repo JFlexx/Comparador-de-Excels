@@ -14,6 +14,11 @@ from comparator import (
     export_decision_template,
 )
 
+
+def source_action_for_base(base: str) -> str:
+    return "use_b" if base == "a" else "use_a"
+
+
 st.set_page_config(page_title="Comparador de Excels", layout="wide")
 st.title("📘 Comparador de libros Excel (multi-hoja)")
 st.caption(
@@ -35,9 +40,9 @@ options = CompareOptions(
 
 col1, col2 = st.columns(2)
 with col1:
-    file_a = st.file_uploader("Excel A (base)", type=["xlsx", "xlsm"], key="a")
+    file_a = st.file_uploader("Excel A", type=["xlsx", "xlsm"], key="a")
 with col2:
-    file_b = st.file_uploader("Excel B (a comparar)", type=["xlsx", "xlsm"], key="b")
+    file_b = st.file_uploader("Excel B", type=["xlsx", "xlsm"], key="b")
 
 if not (file_a and file_b):
     st.info("Carga ambos archivos para comenzar.")
@@ -64,10 +69,23 @@ if diff.only_in_a:
 if diff.only_in_b:
     st.info(f"Hojas solo en B: {', '.join(diff.only_in_b)}")
 
+merge_direction = st.radio(
+    "Dirección del merge",
+    options=["a", "b"],
+    format_func=lambda side: "Traer cambios de B hacia A" if side == "a" else "Traer cambios de A hacia B",
+    horizontal=True,
+)
+base_label = "A" if merge_direction == "a" else "B"
+source_label = "B" if merge_direction == "a" else "A"
+st.caption(f"Base destino actual: {base_label}. Se propondrá copiar cambios desde {source_label}.")
+default_action = source_action_for_base(merge_direction)
+
 web_tab, excel_tab = st.tabs(["🖥️ Resolver en web", "📗 Resolver en Excel"])
 
 with web_tab:
     df = diffs_to_dataframe(diff.all_differences())
+    if not df.empty:
+        df["action"] = default_action
 
     if df.empty:
         st.success("No hay diferencias entre las hojas comunes.")
@@ -91,12 +109,12 @@ with web_tab:
             },
         )
 
-        include_extra = st.checkbox("Copiar hojas solo existentes en B", value=True)
+        include_extra = st.checkbox(f"Copiar hojas solo existentes en {source_label}", value=True)
         output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
 
         if st.button("Generar Excel combinado (web)"):
             output_path = temp_dir / output_name
-            result = apply_decisions(path_a, edited, output_path, path_b, include_sheets_only_in_b=include_extra)
+            result = apply_decisions(path_a, edited, output_path, path_b, base=merge_direction, include_sheets_from_source_only=include_extra)
             st.success("Archivo combinado generado.")
             st.download_button(
                 label="Descargar resultado",
@@ -108,12 +126,13 @@ with web_tab:
 with excel_tab:
     st.write(
         "Flujo recomendado si quieres trabajar dentro de Excel: "
-        "1) descarga plantilla de decisiones, 2) edítala en Excel, 3) súbela y genera resultado."
+        f"1) elige si quieres traer cambios de {source_label} hacia {base_label}, "
+        "2) descarga plantilla de decisiones, 3) edítala en Excel, 4) súbela y genera resultado."
     )
 
     template_name = st.text_input("Nombre plantilla", "decisiones.xlsx")
     template_path = temp_dir / template_name
-    export_decision_template(diff, template_path)
+    export_decision_template(diff, template_path, default_action=default_action)
     st.download_button(
         label="Descargar plantilla de decisiones",
         data=template_path.read_bytes(),
@@ -126,7 +145,7 @@ with excel_tab:
         type=["xlsx", "xlsm"],
         key="decisions_excel",
     )
-    include_extra_excel = st.checkbox("Copiar hojas solo en B (flujo Excel)", value=True)
+    include_extra_excel = st.checkbox(f"Copiar hojas solo en {source_label} (flujo Excel)", value=True)
     output_name_excel = st.text_input("Nombre salida (flujo Excel)", "resultado_excel_flow.xlsx")
 
     if decisions_file and st.button("Generar Excel combinado (desde plantilla Excel)"):
@@ -140,7 +159,8 @@ with excel_tab:
             decisions_df,
             output_path,
             path_b,
-            include_sheets_only_in_b=include_extra_excel,
+            base=merge_direction,
+            include_sheets_from_source_only=include_extra_excel,
         )
         st.success("Archivo combinado generado desde plantilla Excel.")
         st.download_button(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Literal, Optional
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -11,6 +11,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 DEFAULT_ACTION = "use_b"
 VALID_ACTIONS = {"use_a", "use_b", "manual"}
+WorkbookSide = Literal["a", "b"]
 
 
 @dataclass
@@ -61,6 +62,12 @@ def _normalize(value: object, options: CompareOptions) -> object:
         return None
 
     return value
+
+
+def _resolve_direction(base: WorkbookSide) -> tuple[str, str]:
+    if base not in {"a", "b"}:
+        raise ValueError("base debe ser 'a' o 'b'")
+    return ("a", "b") if base == "a" else ("b", "a")
 
 
 def compare_workbooks(
@@ -206,14 +213,18 @@ def decisions_from_excel(path: str | Path, sheet_name: str = "Decisiones") -> pd
 
 
 def apply_decisions(
-    base_workbook: str | Path,
+    workbook_a: str | Path,
     decisions: pd.DataFrame,
     output_path: str | Path,
     workbook_b: str | Path,
-    include_sheets_only_in_b: bool = True,
+    base: WorkbookSide = "a",
+    include_sheets_from_source_only: bool = True,
 ) -> Path:
-    wb_out = load_workbook(base_workbook)
-    wb_b = load_workbook(workbook_b)
+    base_key, source_key = _resolve_direction(base)
+    workbook_paths = {"a": workbook_a, "b": workbook_b}
+
+    wb_out = load_workbook(workbook_paths[base_key])
+    wb_source = load_workbook(workbook_paths[source_key])
 
     for _, row in decisions.iterrows():
         sheet_name = row["sheet"]
@@ -225,22 +236,22 @@ def apply_decisions(
             wb_out.create_sheet(sheet_name)
         ws_out = wb_out[sheet_name]
 
-        if action == "use_a":
+        if action == f"use_{base_key}":
             continue
-        if action == "use_b":
-            if sheet_name in wb_b.sheetnames:
-                ws_out.cell(row=r, column=c).value = wb_b[sheet_name].cell(row=r, column=c).value
+        if action == f"use_{source_key}":
+            if sheet_name in wb_source.sheetnames:
+                ws_out.cell(row=r, column=c).value = wb_source[sheet_name].cell(row=r, column=c).value
         elif action == "manual":
             ws_out.cell(row=r, column=c).value = row.get("manual_value")
 
-    if include_sheets_only_in_b:
-        for sheet in wb_b.sheetnames:
+    if include_sheets_from_source_only:
+        for sheet in wb_source.sheetnames:
             if sheet not in wb_out.sheetnames:
-                src = wb_b[sheet]
+                src = wb_source[sheet]
                 ws_new = wb_out.create_sheet(sheet)
-                for source_row in src.iter_rows():
-                    for cell in source_row:
-                        ws_new.cell(row=cell.row, column=cell.column).value = cell.value
+                for row in src.iter_rows():
+                    for cell in row:
+                        ws_new[cell.coordinate] = cell.value
 
     output_path = Path(output_path)
     wb_out.save(output_path)

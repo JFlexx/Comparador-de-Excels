@@ -68,7 +68,7 @@ def test_compare_options_ignore_case_and_spaces(tmp_path: Path):
     assert relaxed_diff.all_differences() == []
 
 
-def test_apply_decisions_merges_changes(tmp_path: Path):
+def test_apply_decisions_merges_changes_from_b_onto_a(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
 
@@ -79,11 +79,30 @@ def test_apply_decisions_merges_changes(tmp_path: Path):
     df = diffs_to_dataframe(diff.all_differences())
 
     output = tmp_path / "out.xlsx"
-    apply_decisions(a, df, output, b)
+    apply_decisions(a, df, output, b, base="a")
 
     wb = load_workbook(output)
     assert wb["Datos"]["A2"].value == "nuevo"
     assert wb["Nueva"]["A1"].value == 99
+
+
+
+def test_apply_decisions_merges_changes_from_a_onto_b(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "hola", "A2": "nuevo"}, "NuevaA": {"A1": 42}})
+    _create_wb(b, {"Datos": {"A1": "hola", "A2": "base"}})
+
+    diff = compare_workbooks(a, b)
+    df = diffs_to_dataframe(diff.all_differences())
+
+    output = tmp_path / "out_b.xlsx"
+    apply_decisions(a, df, output, b, base="b")
+
+    wb = load_workbook(output)
+    assert wb["Datos"]["A2"].value == "nuevo"
+    assert wb["NuevaA"]["A1"].value == 42
 
 
 def test_export_and_read_decisions_template(tmp_path: Path):
