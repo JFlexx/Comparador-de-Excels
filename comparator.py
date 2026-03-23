@@ -571,7 +571,7 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
                 "row": diff.row,
                 "column": diff.column,
                 "column_letter": column_letter(diff.column),
-                "context": f"{diff.sheet}!{diff.coordinate} · fila {diff.row} · columna {column_letter(diff.column)} ({diff.column})",
+                "context": f"{diff.sheet}!{diff.coordinate}",
                 "header": diff.header,
                 "key": diff.key,
                 "diff_type": diff.diff_type,

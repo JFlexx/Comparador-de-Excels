@@ -166,10 +166,13 @@ payload = {
 
 Y llama al adaptador:
 
-- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`, incluyendo merge lógico por registro.
-- `interface_adapter.py`: capa adaptadora para interfaces. Centraliza parsing de opciones, etiquetas de dirección de merge, DataFrames de revisión y llamadas al servicio.
-- `app.py`: interfaz web en Streamlit; solo orquesta UI y delega en la capa adaptadora.
-- `excel_tool.py`: CLI para flujo Excel-first; solo interpreta argumentos y delega en la capa adaptadora.
+- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`.
+- `interface_adapter.py`: adaptador compartido con parsing de opciones, DTOs de dirección de merge y acceso estable al servicio.
+- `streamlit_adapter.py`: adaptador específico de Streamlit; prepara tablas de revisión y wording visual sin contaminar el motor.
+- `cli_adapter.py`: adaptador específico de CLI; transforma argumentos/reportes sin mezclar reglas de negocio.
+- `excel_adapter.py`: adaptador específico para exportar/importar decisiones y ejecutar merges desde flujos Excel.
+- `app.py`: interfaz web en Streamlit; consume `streamlit_adapter.py` y `excel_adapter.py`.
+- `excel_tool.py`: CLI para flujo Excel-first; consume `cli_adapter.py`.
 - `tests/test_comparator.py`: pruebas unitarias del núcleo y de los contratos principales.
 
 adapter = ExcelAddinAdapter()
