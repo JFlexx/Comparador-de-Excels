@@ -1,66 +1,32 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
+from cli_adapter import run_compare_command, run_merge_command
 from comparator import VALID_ACTIONS, VALID_COMPARE_MODES
-from interface_adapter import (
-    build_compare_options,
-    compare_files,
-    default_action_for_base,
-    load_decisions,
-    merge_labels,
-    merge_workbooks,
-    parse_sheet_keys_args,
-    export_template,
-)
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    options = build_compare_options(
-        compare_mode=args.compare_mode,
-        ignore_case=args.ignore_case,
-        keep_spaces=args.keep_spaces,
-        empty_string_is_value=args.empty_string_is_value,
-        header_row=args.header_row,
-        sheet_keys=parse_sheet_keys_args(args.sheet_key),
-    )
-    diff = compare_files(args.a, args.b, options)
-
-    template_path = Path(args.template)
-    default_action = args.default_action or default_action_for_base(args.base)
-    export_template(diff, template_path, base=args.base, default_action=default_action)
-
-    labels = merge_labels(args.base)
+    report = run_compare_command(args)
     print("Comparación completada.")
-    print(f"- Modo: {args.compare_mode}")
-    print(f"- Hojas en común: {len(diff.common_sheets)}")
-    print(f"- Hojas solo en A: {len(diff.only_in_a)}")
-    print(f"- Hojas solo en B: {len(diff.only_in_b)}")
-    print(f"- Diferencias: {diff.total_differences}")
-    print(f"- Merge objetivo: traer cambios de {labels.source} hacia {labels.base}")
-    print(f"- Acción por defecto: {default_action}")
-    print(f"Plantilla de decisiones creada: {template_path}")
+    print(f"- Modo: {report.compare_mode}")
+    print(f"- Hojas en común: {report.common_sheets}")
+    print(f"- Hojas solo en A: {report.only_in_a}")
+    print(f"- Hojas solo en B: {report.only_in_b}")
+    print(f"- Diferencias: {report.total_differences}")
+    print(
+        f"- Merge objetivo: traer cambios de {report.merge.source_label} hacia {report.merge.base_label}"
+    )
+    print(f"- Acción por defecto: {report.default_action}")
+    print(f"Plantilla de decisiones creada: {report.template_path}")
     return 0
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    decisions = load_decisions(args.decisions)
-    output_path = Path(args.output)
-
-    merge_workbooks(
-        workbook_a=args.a,
-        workbook_b=args.b,
-        decisions=decisions,
-        output_path=output_path,
-        base=args.apply_onto,
-        include_sheets_from_source_only=not args.no_copy_extra_sheets,
-    )
-
-    labels = merge_labels(args.apply_onto)
-    print(f"Libro combinado generado: {output_path}")
-    print(f"- Base destino: {labels.base}")
-    print(f"- Se aplicaron decisiones para traer cambios de {labels.source}")
+    report = run_merge_command(args)
+    print(f"Libro combinado generado: {report.output_path}")
+    print(f"- Base destino: {report.merge.base_label}")
+    print(f"- Se aplicaron decisiones para traer cambios de {report.merge.source_label}")
     return 0
 
 
