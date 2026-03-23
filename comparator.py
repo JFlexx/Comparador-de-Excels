@@ -18,6 +18,8 @@ DEFAULT_ACTION = "use_b"
 VALID_ACTIONS = {"use_a", "use_b", "manual"}
 VALID_COMPARE_MODES = {"coordinate", "row-based"}
 DECISION_SHEET_NAME = "Decisiones"
+SUMMARY_SHEET_NAME = "Resumen"
+SUMMARY_KEYS_PREFIX = "Claves hoja "
 DECISION_COLUMNS = [
     "sheet",
     "cell",
@@ -82,6 +84,9 @@ class MergeRequest:
         `"a"` o `"b"`; indica sobre qué libro se construye el resultado final.
     include_sheets_from_source_only:
         Si es `True`, copia hojas que existan solo en el libro origen.
+    compare_mode/header_row/sheet_keys:
+        Metadata del diff original. En `row-based`, el merge usa `key`, `header`
+        y `diff_type` para ubicar registros por identidad lógica, no solo por coordenada.
     """
 
     workbook_a: str | Path
@@ -90,6 +95,9 @@ class MergeRequest:
     output_path: str | Path
     base: WorkbookSide = "a"
     include_sheets_from_source_only: bool = True
+    compare_mode: CompareMode = "coordinate"
+    header_row: int = 1
+    sheet_keys: Dict[str, List[str]] = field(default_factory=dict)
 
 
 class ComparatorService:
@@ -120,6 +128,9 @@ class ComparatorService:
             output_path=request.output_path,
             base=request.base,
             include_sheets_from_source_only=request.include_sheets_from_source_only,
+            compare_mode=request.compare_mode,
+            header_row=request.header_row,
+            sheet_keys=request.sheet_keys,
         )
 
 
@@ -229,7 +240,14 @@ class WorkbookDiff:
         ]
 
     def to_dataframe(self, default_action: str = DEFAULT_ACTION) -> pd.DataFrame:
-        return diffs_to_dataframe(self._all_differences, default_action=default_action)
+        dataframe = diffs_to_dataframe(self._all_differences, default_action=default_action)
+        _attach_decisions_metadata(
+            dataframe,
+            compare_mode=self.options.compare_mode,
+            header_row=self.options.header_row,
+            sheet_keys=self.options.sheet_keys,
+        )
+        return dataframe
 
 
 def column_letter(column: int) -> str:
@@ -505,6 +523,19 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
     return pd.DataFrame(rows, columns=DECISION_COLUMNS)
 
 
+def _attach_decisions_metadata(
+    dataframe: pd.DataFrame,
+    *,
+    compare_mode: CompareMode,
+    header_row: int,
+    sheet_keys: Mapping[str, Sequence[str]],
+) -> pd.DataFrame:
+    dataframe.attrs["compare_mode"] = compare_mode
+    dataframe.attrs["header_row"] = int(header_row)
+    dataframe.attrs["sheet_keys"] = {sheet: list(columns) for sheet, columns in sheet_keys.items()}
+    return dataframe
+
+
 def _style_decision_sheet(ws: Worksheet) -> None:
     for cell in ws[1]:
         cell.fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
@@ -547,7 +578,7 @@ def export_decision_template(
 
     _style_decision_sheet(ws)
 
-    summary = wb.create_sheet("Resumen")
+    summary = wb.create_sheet(SUMMARY_SHEET_NAME)
     summary.append(["Métrica", "Valor"])
     summary.append(["Modo de comparación", diff.options.compare_mode])
     summary.append(["Fila de encabezados", diff.options.header_row])
@@ -559,6 +590,8 @@ def export_decision_template(
         summary.append(["Lista solo en A", ", ".join(diff.only_in_a)])
     if diff.only_in_b:
         summary.append(["Lista solo en B", ", ".join(diff.only_in_b)])
+    for sheet_name, columns in sorted(diff.options.sheet_keys.items()):
+        summary.append([f"{SUMMARY_KEYS_PREFIX}{sheet_name}", ", ".join(columns)])
     for row in diff.summary_rows():
         summary.append([f"Diferencias en {row['sheet']}", row["differences"]])
 
@@ -614,7 +647,35 @@ def decisions_from_excel(path: str | Path, sheet_name: str = DECISION_SHEET_NAME
     if invalid:
         raise ValueError(f"Acciones no válidas: {invalid}. Válidas: {sorted(VALID_ACTIONS)}")
 
+    if SUMMARY_SHEET_NAME in wb.sheetnames:
+        compare_mode, header_row, sheet_keys = _read_summary_metadata(wb[SUMMARY_SHEET_NAME])
+        _attach_decisions_metadata(
+            df,
+            compare_mode=compare_mode,
+            header_row=header_row,
+            sheet_keys=sheet_keys,
+        )
+
     return df
+
+
+def _read_summary_metadata(ws: Worksheet) -> tuple[CompareMode, int, dict[str, list[str]]]:
+    compare_mode: CompareMode = "coordinate"
+    header_row = 1
+    sheet_keys: dict[str, list[str]] = {}
+
+    for metric, value in ws.iter_rows(min_row=2, max_col=2, values_only=True):
+        if metric == "Modo de comparación" and value in VALID_COMPARE_MODES:
+            compare_mode = str(value)
+        elif metric == "Fila de encabezados" and value is not None:
+            header_row = int(value)
+        elif isinstance(metric, str) and metric.startswith(SUMMARY_KEYS_PREFIX) and value:
+            sheet_name = metric.removeprefix(SUMMARY_KEYS_PREFIX).strip()
+            columns = [column.strip() for column in str(value).split(",") if column.strip()]
+            if sheet_name and columns:
+                sheet_keys[sheet_name] = columns
+
+    return compare_mode, header_row, sheet_keys
 
 
 def _resolve_direction(base: WorkbookSide) -> tuple[WorkbookSide, WorkbookSide]:
@@ -660,6 +721,9 @@ def apply_decisions(
     workbook_b: str | Path,
     base: WorkbookSide = "a",
     include_sheets_from_source_only: bool = True,
+    compare_mode: CompareMode = "coordinate",
+    header_row: int = 1,
+    sheet_keys: Mapping[str, Sequence[str]] | None = None,
 ) -> Path:
     """Aplica decisiones sobre el libro base y genera un archivo combinado.
 
@@ -667,12 +731,20 @@ def apply_decisions(
     - `decisions` debe cumplir `validate_decisions_dataframe`.
     - `action` válidas: `use_a`, `use_b`, `manual`.
     - `base="a"` construye el resultado sobre A; `base="b"` sobre B.
+    - `compare_mode="row-based"` aplica decisiones por identidad lógica
+      (`sheet`, `key`, `header`, `diff_type`) y usa `header_row` / `sheet_keys`
+      para localizar registros en ambos libros.
 
     Salida:
     - `Path` del archivo generado.
     """
 
     normalized_decisions = validate_decisions_dataframe(decisions)
+    compare_mode = decisions.attrs.get("compare_mode", compare_mode)
+    header_row = int(decisions.attrs.get("header_row", header_row))
+    merged_sheet_keys = {sheet: list(columns) for sheet, columns in (sheet_keys or {}).items()}
+    for sheet, columns in decisions.attrs.get("sheet_keys", {}).items():
+        merged_sheet_keys.setdefault(sheet, list(columns))
     base_key, source_key = _resolve_direction(base)
     workbook_paths = {"a": workbook_a, "b": workbook_b}
 
@@ -680,29 +752,40 @@ def apply_decisions(
     wb_a = load_workbook(workbook_a)
     wb_b = load_workbook(workbook_b)
     workbooks = {"a": wb_a, "b": wb_b}
+    wb_source = workbooks[source_key]
 
-    for _, row in normalized_decisions.iterrows():
-        sheet_name = str(row["sheet"])
-        row_index = int(row["row"])
-        column_index = int(row["column"])
-        action = str(row["action"])
+    if compare_mode == "row-based":
+        _apply_row_based_decisions(
+            wb_out=wb_out,
+            wb_a=wb_a,
+            wb_b=wb_b,
+            decisions=normalized_decisions,
+            header_row=header_row,
+            sheet_keys=merged_sheet_keys,
+        )
+    else:
+        for _, row in normalized_decisions.iterrows():
+            sheet_name = str(row["sheet"])
+            row_index = int(row["row"])
+            column_index = int(row["column"])
+            action = str(row["action"])
 
-        if sheet_name not in wb_out.sheetnames:
-            wb_out.create_sheet(sheet_name)
-        ws_out = wb_out[sheet_name]
+            if sheet_name not in wb_out.sheetnames:
+                wb_out.create_sheet(sheet_name)
+            ws_out = wb_out[sheet_name]
 
-        if action == f"use_{base_key}":
-            continue
+            if action == f"use_{base_key}":
+                continue
 
-        if action == f"use_{source_key}":
-            if sheet_name in wb_source.sheetnames:
-                ws_out.cell(row=row_index, column=column_index).value = wb_source[sheet_name].cell(
-                    row=row_index,
-                    column=column_index,
-                ).value
-            continue
+            if action == f"use_{source_key}":
+                if sheet_name in wb_source.sheetnames:
+                    ws_out.cell(row=row_index, column=column_index).value = wb_source[sheet_name].cell(
+                        row=row_index,
+                        column=column_index,
+                    ).value
+                continue
 
-        ws_out.cell(row=row_index, column=column_index).value = row.get("manual_value")
+            ws_out.cell(row=row_index, column=column_index).value = row.get("manual_value")
 
     if include_sheets_from_source_only:
         wb_source = workbooks[source_key]
@@ -718,6 +801,163 @@ def apply_decisions(
     output = Path(output_path)
     wb_out.save(output)
     return output
+
+
+def _parse_key_label(key_label: object) -> dict[str, str]:
+    if key_label is None:
+        return {}
+    text = str(key_label).strip()
+    if not text or text.startswith("fila="):
+        return {}
+
+    parsed: dict[str, str] = {}
+    for part in text.split(", "):
+        if "=" not in part:
+            return {}
+        header, value = part.split("=", 1)
+        parsed[header.strip()] = value
+    return parsed
+
+
+def _sheet_headers(ws: Worksheet, header_row: int) -> tuple[list[str], dict[str, int]]:
+    raw_headers = [ws.cell(row=header_row, column=col).value for col in range(1, ws.max_column + 1)]
+    headers: list[str] = []
+    header_to_column: dict[str, int] = {}
+    for idx, raw_header in enumerate(raw_headers, start=1):
+        header = str(raw_header).strip() if raw_header is not None else f"__col_{idx}"
+        if not header:
+            header = f"__col_{idx}"
+        if header in header_to_column:
+            header = f"{header}__{idx}"
+        headers.append(header)
+        header_to_column[header] = idx
+    return headers, header_to_column
+
+
+def _find_row_by_key_label(ws: Worksheet, key_label: object, header_row: int) -> int | None:
+    parsed_key = _parse_key_label(key_label)
+    if parsed_key:
+        headers, _ = _sheet_headers(ws, header_row)
+        for row_idx in range(header_row + 1, ws.max_row + 1):
+            values = {header: ws.cell(row=row_idx, column=col_idx).value for col_idx, header in enumerate(headers, start=1)}
+            if all(_stringify_key_part(values.get(header)) == expected for header, expected in parsed_key.items()):
+                return row_idx
+
+    text = str(key_label).strip() if key_label is not None else ""
+    if text.startswith("fila="):
+        try:
+            return int(text.split("=", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _ensure_header_column(ws: Worksheet, header: object, header_row: int, fallback_column: int) -> int:
+    if header:
+        _, header_to_column = _sheet_headers(ws, header_row)
+        header_name = str(header)
+        if header_name in header_to_column:
+            return int(header_to_column[header_name])
+        new_column = ws.max_column + 1
+        ws.cell(row=header_row, column=new_column).value = header_name
+        return new_column
+    return max(1, int(fallback_column))
+
+
+def _copy_row_values(ws_from: Worksheet, row_from: int, ws_to: Worksheet, row_to: int, header_row: int) -> None:
+    headers, header_to_column = _sheet_headers(ws_from, header_row)
+    for header in headers:
+        from_column = header_to_column[header]
+        to_column = _ensure_header_column(ws_to, header, header_row, from_column)
+        ws_to.cell(row=row_to, column=to_column).value = ws_from.cell(row=row_from, column=from_column).value
+
+
+def _allocate_row_for_key(ws: Worksheet, key_label: object, header_row: int) -> int:
+    existing_row = _find_row_by_key_label(ws, key_label, header_row)
+    if existing_row is not None:
+        return existing_row
+
+    candidate = max(header_row + 1, ws.max_row + 1)
+    parsed_key = _parse_key_label(key_label)
+    for header, value in parsed_key.items():
+        column_index = _ensure_header_column(ws, header, header_row, ws.max_column + 1)
+        ws.cell(row=candidate, column=column_index).value = None if value == "<vacío>" else value
+    return candidate
+
+
+def _apply_row_based_decisions(
+    *,
+    wb_out: Workbook,
+    wb_a: Workbook,
+    wb_b: Workbook,
+    decisions: pd.DataFrame,
+    header_row: int,
+    sheet_keys: Mapping[str, Sequence[str]],
+) -> None:
+    grouped = decisions.groupby(["sheet", "key", "diff_type"], dropna=False, sort=False)
+
+    for (sheet_name, key_label, diff_type), group in grouped:
+        sheet_name = str(sheet_name)
+        key_label = None if pd.isna(key_label) else key_label
+        diff_type = str(diff_type)
+
+        if sheet_name not in wb_out.sheetnames:
+            wb_out.create_sheet(sheet_name)
+        ws_out = wb_out[sheet_name]
+
+        ws_a = wb_a[sheet_name] if sheet_name in wb_a.sheetnames else None
+        ws_b = wb_b[sheet_name] if sheet_name in wb_b.sheetnames else None
+
+        row_out = _find_row_by_key_label(ws_out, key_label, header_row)
+        row_a = _find_row_by_key_label(ws_a, key_label, header_row) if ws_a is not None else None
+        row_b = _find_row_by_key_label(ws_b, key_label, header_row) if ws_b is not None else None
+
+        if (
+            diff_type in {"added", "deleted"}
+            and len(set(group["action"].tolist())) == 1
+            and group["action"].iloc[0] in {"use_a", "use_b"}
+        ):
+            action = str(group["action"].iloc[0])
+            chosen_sheet = ws_a if action == "use_a" else ws_b
+            chosen_row = row_a if action == "use_a" else row_b
+            if chosen_sheet is None or chosen_row is None:
+                if row_out is not None and diff_type == "deleted":
+                    ws_out.delete_rows(row_out, 1)
+                continue
+            if row_out is None:
+                row_out = _allocate_row_for_key(ws_out, key_label, header_row)
+            _copy_row_values(chosen_sheet, chosen_row, ws_out, row_out, header_row)
+            continue
+
+        if diff_type == "added" and row_out is None:
+            row_out = _allocate_row_for_key(ws_out, key_label, header_row)
+
+        for _, decision in group.iterrows():
+            action = str(decision["action"])
+            header = decision["header"]
+            column_index = _ensure_header_column(ws_out, header, header_row, int(decision["column"]))
+
+            if row_out is None:
+                fallback_label = f"fila={int(decision['row'])}"
+                row_out = _allocate_row_for_key(ws_out, fallback_label, header_row)
+
+            if action == "manual":
+                ws_out.cell(row=row_out, column=column_index).value = decision.get("manual_value")
+                continue
+
+            if action == "use_a":
+                if ws_a is None or row_a is None:
+                    ws_out.cell(row=row_out, column=column_index).value = None
+                    continue
+                source_column = _ensure_header_column(ws_a, header, header_row, int(decision["column"]))
+                ws_out.cell(row=row_out, column=column_index).value = ws_a.cell(row=row_a, column=source_column).value
+                continue
+
+            if ws_b is None or row_b is None:
+                ws_out.cell(row=row_out, column=column_index).value = None
+                continue
+            source_column = _ensure_header_column(ws_b, header, header_row, int(decision["column"]))
+            ws_out.cell(row=row_out, column=column_index).value = ws_b.cell(row=row_b, column=source_column).value
 
 
 __all__ = [

@@ -51,6 +51,7 @@ pip install -r requirements.txt
 - Puede haber **altas, bajas o inserciones intermedias** de filas.
 - Quieres evitar el efecto cascada típico de los diffs por coordenadas cuando una fila nueva desplaza todas las siguientes.
 - Puedes definir una o varias columnas clave por hoja, por ejemplo `Clientes:ID` o `Pedidos:Empresa,NúmeroPedido`.
+- También quieres **fusionar** esos cambios al libro final sin depender de la coordenada original de Excel.
 
 ### Cómo funciona `row-based`
 
@@ -58,8 +59,9 @@ pip install -r requirements.txt
 - Empareja filas por las columnas clave configuradas para esa hoja.
 - Si una hoja no tiene clave configurada, usa el contenido completo de la fila como identidad implícita.
 - Reporta diferencias con tipo `added`, `deleted` o `modified`.
+- La plantilla de decisiones y el merge consumen `sheet`, `key`, `header` y `diff_type` para reubicar el registro al aplicar cambios.
 
-> **Nota:** la comparación `row-based` está orientada a auditoría y revisión de registros. La combinación automática del libro final sigue siendo la opción recomendada en modo `coordinate`.
+> **Nota:** para que el merge `row-based` sea estable y predecible, conviene definir `sheet_keys` por hoja. Si no se define clave, el motor puede caer en coordenadas/fila de apoyo cuando no pueda reconstruir una identidad lógica suficiente.
 
 ## Interfaz 1: Web (Streamlit)
 
@@ -93,6 +95,7 @@ python excel_tool.py compare   --a libro_a.xlsx   --b libro_b.xlsx   --compare-m
 Esto genera `decisiones.xlsx` con:
 - Hoja `Decisiones`: una fila por diferencia.
 - Columnas auxiliares como `header`, `diff_type` y `key` para identificar el registro afectado.
+- Metadata del diff en la hoja `Resumen` (`compare_mode`, `header_row`, `sheet_keys`) para permitir merge posterior también en `row-based`.
 - Columna `action` con lista desplegable (`use_a`, `use_b`, `manual`).
 - Columna `manual_value` para casos manuales.
 
@@ -116,7 +119,7 @@ python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base b --templa
 python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones_a_hacia_b.xlsx --apply-onto b --output resultado_a_hacia_b.xlsx
 ```
 
-En la interfaz web (`streamlit run app.py`) ahora también puedes elegir visualmente la dirección del merge antes de generar el archivo final.
+En la interfaz web (`streamlit run app.py`) ahora también puedes elegir visualmente la dirección del merge antes de generar el archivo final. Esto aplica tanto a `coordinate` como a `row-based`.
 
 ---
 
@@ -128,7 +131,7 @@ pytest -q
 
 ## Arquitectura
 
-- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`.
+- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`, incluyendo merge lógico por registro.
 - `interface_adapter.py`: capa adaptadora para interfaces. Centraliza parsing de opciones, etiquetas de dirección de merge, DataFrames de revisión y llamadas al servicio.
 - `app.py`: interfaz web en Streamlit; solo orquesta UI y delega en la capa adaptadora.
 - `excel_tool.py`: CLI para flujo Excel-first; solo interpreta argumentos y delega en la capa adaptadora.
@@ -168,14 +171,16 @@ La comparación, la construcción del DataFrame de decisiones válido, la export
 - **Entrada:** un `WorkbookDiff`, una ruta de salida y una acción por defecto válida.
 - **Salida:** archivo Excel con hoja `Decisiones` y hoja `Resumen`.
 - **Contrato de decisiones:** la hoja `Decisiones` usa columnas estables como `sheet`, `row`, `column`, `header`, `key`, `diff_type`, `action`, `manual_value` y `reviewed`.
+- **Metadata complementaria:** la hoja `Resumen` persiste `compare_mode`, `header_row` y `sheet_keys` para que el merge pueda reconstruir el contexto lógico del diff.
 
 #### `decisions_from_excel(path)`
 
 - **Entrada:** ruta a una plantilla editada.
 - **Salida:** `pandas.DataFrame` normalizado, con columnas estándar del motor.
 - **Acciones válidas:** `use_a`, `use_b`, `manual`.
+- **Metadata preservada:** cuando existe hoja `Resumen`, el DataFrame resultante conserva `compare_mode`, `header_row` y `sheet_keys` en `DataFrame.attrs`.
 
-#### `apply_decisions(workbook_a, decisions, output_path, workbook_b, base)`
+#### `apply_decisions(workbook_a, decisions, output_path, workbook_b, base, compare_mode, header_row, sheet_keys)`
 
 - **Entrada:** dos rutas de libros, un DataFrame de decisiones y la base de merge (`a` o `b`).
 - **Salida:** libro combinado en `output_path`.
@@ -183,6 +188,7 @@ La comparación, la construcción del DataFrame de decisiones válido, la export
   - `use_a`: conserva el valor de A.
   - `use_b`: conserva el valor de B.
   - `manual`: escribe `manual_value`.
+- **Contrato `row-based`:** cuando `compare_mode="row-based"`, el merge resuelve decisiones por identidad lógica de registro usando `sheet`, `key`, `header` y `diff_type`, y se apoya en `header_row` / `sheet_keys` para localizar filas aunque hayan cambiado de posición.
 
 ### Puntos de integración para un futuro add-in
 
@@ -199,5 +205,5 @@ Un add-in de Excel o una API interna necesitaría, como mínimo, estos puntos de
 
 - Soporta `.xlsx` y `.xlsm`.
 - Compara valores de celda (no formato, estilos, comentarios, validaciones avanzadas).
-- En modo `row-based`, usa encabezados para comparar estructura y detectar registros agregados/eliminados/modificados.
+- En modo `row-based`, usa encabezados para comparar estructura y detectar registros agregados/eliminados/modificados, y puede aplicar merge sobre esos registros desde la web o desde la plantilla Excel.
 - Si quieres auditoría, puedes añadir columnas como usuario/fecha/comentario en la plantilla y extender `apply_decisions`.

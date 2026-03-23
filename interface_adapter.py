@@ -120,6 +120,9 @@ def merge_workbooks(
     base: WorkbookSide,
     include_sheets_from_source_only: bool,
 ) -> Path:
+    compare_mode = decisions.attrs.get("compare_mode", "coordinate")
+    header_row = int(decisions.attrs.get("header_row", 1))
+    sheet_keys = decisions.attrs.get("sheet_keys", {})
     return SERVICE.apply_decisions(
         MergeRequest(
             workbook_a=workbook_a,
@@ -128,6 +131,9 @@ def merge_workbooks(
             output_path=output_path,
             base=base,
             include_sheets_from_source_only=include_sheets_from_source_only,
+            compare_mode=compare_mode,
+            header_row=header_row,
+            sheet_keys={sheet: list(columns) for sheet, columns in sheet_keys.items()},
         )
     )
 

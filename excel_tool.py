@@ -40,6 +40,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
     print(f"- Diferencias: {diff.total_differences}")
     print(f"- Merge objetivo: traer cambios de {labels.source} hacia {labels.base}")
     print(f"- Acción por defecto: {default_action}")
+    if args.compare_mode == "row-based":
+        print("- Merge row-based habilitado: la plantilla conserva metadata para aplicar decisiones por clave.")
     print(f"Plantilla de decisiones creada: {template_path}")
     return 0
 
@@ -61,6 +63,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     print(f"Libro combinado generado: {output_path}")
     print(f"- Base destino: {labels.base}")
     print(f"- Se aplicaron decisiones para traer cambios de {labels.source}")
+    if decisions.attrs.get("compare_mode") == "row-based":
+        print("- El merge se resolvió por identidad lógica del registro (key/header/diff_type).")
     return 0
 
 
