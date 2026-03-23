@@ -680,6 +680,7 @@ def apply_decisions(
     wb_a = load_workbook(workbook_a)
     wb_b = load_workbook(workbook_b)
     workbooks = {"a": wb_a, "b": wb_b}
+    wb_source = workbooks[source_key]
 
     for _, row in normalized_decisions.iterrows():
         sheet_name = str(row["sheet"])
