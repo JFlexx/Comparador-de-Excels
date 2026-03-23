@@ -8,16 +8,38 @@ import streamlit as st
 
 from comparator import (
     CompareOptions,
+    VALID_COMPARE_MODES,
     apply_decisions,
     compare_workbooks,
     decisions_from_excel,
     export_decision_template,
 )
 
+
+def _parse_sheet_keys(raw_value: str) -> dict[str, list[str]]:
+    sheet_keys: dict[str, list[str]] = {}
+    for line in raw_value.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if ':' not in cleaned:
+            raise ValueError(
+                "Cada línea debe usar el formato Hoja:columna1,columna2"
+            )
+        sheet_name, raw_columns = cleaned.split(':', 1)
+        columns = [column.strip() for column in raw_columns.split(',') if column.strip()]
+        if not sheet_name.strip() or not columns:
+            raise ValueError(
+                "Cada línea debe incluir nombre de hoja y al menos una columna clave"
+            )
+        sheet_keys[sheet_name.strip()] = columns
+    return sheet_keys
+
+
 st.set_page_config(page_title="Comparador de Excels", layout="wide")
 st.title("📘 Comparador de libros Excel (multi-hoja)")
 st.caption(
-    "Compara dos libros completos y resuelve diferencias por celda. "
+    "Compara dos libros completos y resuelve diferencias por celda o por registros. "
     "Incluye flujo Web (Streamlit) y flujo Excel nativo (plantilla editable)."
 )
 
@@ -44,14 +66,42 @@ def _format_value(value: object) -> str:
 
 with st.sidebar:
     st.header("Opciones de comparación")
+    compare_mode = st.selectbox(
+        "Modo de comparación",
+        options=list(VALID_COMPARE_MODES),
+        format_func=lambda value: "Por coordenadas" if value == "coordinate" else "Por filas/estructura",
+        help=(
+            "Por coordenadas compara celda contra celda. "
+            "Por filas usa encabezados y columnas clave para detectar altas, bajas y cambios sin cascadas."
+        ),
+    )
     ignore_case = st.checkbox("Ignorar mayúsculas/minúsculas", value=False)
     keep_spaces = st.checkbox("No recortar espacios", value=False)
     empty_string_is_value = st.checkbox("Distinguir '' y None", value=False)
+    header_row = st.number_input("Fila de encabezados", min_value=1, value=1, step=1)
+    sheet_keys_raw = st.text_area(
+        "Claves por hoja",
+        value="",
+        height=120,
+        help=(
+            "Una hoja por línea con formato Hoja:columna1,columna2. "
+            "Si una hoja no tiene clave configurada, se comparará usando la fila completa."
+        ),
+    )
+
+try:
+    sheet_keys = _parse_sheet_keys(sheet_keys_raw)
+except ValueError as exc:
+    st.sidebar.error(str(exc))
+    st.stop()
 
 options = CompareOptions(
     strip_strings=not keep_spaces,
     case_sensitive=not ignore_case,
     ignore_empty_string_vs_none=not empty_string_is_value,
+    compare_mode=compare_mode,
+    sheet_keys=sheet_keys,
+    header_row=int(header_row),
 )
 
 col1, col2 = st.columns(2)
@@ -241,7 +291,12 @@ with excel_tab:
     include_extra_excel = st.checkbox("Copiar hojas solo en B (flujo Excel)", value=True)
     output_name_excel = st.text_input("Nombre salida (flujo Excel)", "resultado_excel_flow.xlsx")
 
-    if decisions_file and st.button("Generar Excel combinado (desde plantilla Excel)"):
+    if compare_mode == "row-based":
+        st.info(
+            "La plantilla exportada en modo por filas sirve para revisar diferencias por registro. "
+            "La fusión automática desde plantilla queda reservada al modo por coordenadas."
+        )
+    elif decisions_file and st.button("Generar Excel combinado (desde plantilla Excel)"):
         decisions_path = temp_dir / decisions_file.name
         decisions_path.write_bytes(decisions_file.getbuffer())
 

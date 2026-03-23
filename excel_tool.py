@@ -5,6 +5,7 @@ from pathlib import Path
 
 from comparator import (
     CompareOptions,
+    VALID_COMPARE_MODES,
     apply_decisions,
     compare_workbooks,
     decisions_from_excel,
@@ -12,11 +13,31 @@ from comparator import (
 )
 
 
+def _parse_sheet_keys(values: list[str] | None) -> dict[str, list[str]]:
+    sheet_keys: dict[str, list[str]] = {}
+    for raw_value in values or []:
+        if '=' not in raw_value:
+            raise ValueError(
+                "Cada --sheet-key debe usar el formato Hoja=columna1,columna2"
+            )
+        sheet_name, raw_columns = raw_value.split('=', 1)
+        columns = [column.strip() for column in raw_columns.split(',') if column.strip()]
+        if not sheet_name.strip() or not columns:
+            raise ValueError(
+                "Cada --sheet-key debe incluir nombre de hoja y al menos una columna clave"
+            )
+        sheet_keys[sheet_name.strip()] = columns
+    return sheet_keys
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     options = CompareOptions(
         strip_strings=not args.keep_spaces,
         case_sensitive=not args.ignore_case,
         ignore_empty_string_vs_none=not args.empty_string_is_value,
+        compare_mode=args.compare_mode,
+        sheet_keys=_parse_sheet_keys(args.sheet_key),
+        header_row=args.header_row,
     )
     diff = compare_workbooks(args.a, args.b, options=options)
 
@@ -24,6 +45,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     export_decision_template(diff, template_path, default_action=args.default_action)
 
     print("Comparación completada.")
+    print(f"- Modo: {args.compare_mode}")
     print(f"- Hojas en común: {len(diff.common_sheets)}")
     print(f"- Hojas solo en A: {len(diff.only_in_a)}")
     print(f"- Hojas solo en B: {len(diff.only_in_b)}")
@@ -68,6 +90,23 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["use_a", "use_b", "manual"],
         default="use_b",
         help="Acción por defecto para cada diferencia",
+    )
+    compare.add_argument(
+        "--compare-mode",
+        choices=sorted(VALID_COMPARE_MODES),
+        default="coordinate",
+        help="coordinate para comparar celda a celda; row-based para comparar registros por encabezados/clave",
+    )
+    compare.add_argument(
+        "--sheet-key",
+        action="append",
+        help="Clave por hoja con formato Hoja=columna1,columna2. Repetible.",
+    )
+    compare.add_argument(
+        "--header-row",
+        type=int,
+        default=1,
+        help="Fila que contiene los encabezados para el modo row-based",
     )
     compare.add_argument("--ignore-case", action="store_true", help="No distinguir mayúsculas/minúsculas")
     compare.add_argument("--keep-spaces", action="store_true", help="No recortar espacios en strings")
