@@ -677,7 +677,9 @@ def apply_decisions(
     workbook_paths = {"a": workbook_a, "b": workbook_b}
 
     wb_out = load_workbook(workbook_paths[base_key])
-    wb_source = load_workbook(workbook_paths[source_key])
+    wb_a = load_workbook(workbook_a)
+    wb_b = load_workbook(workbook_b)
+    workbooks = {"a": wb_a, "b": wb_b}
 
     for _, row in normalized_decisions.iterrows():
         sheet_name = str(row["sheet"])
@@ -703,6 +705,7 @@ def apply_decisions(
         ws_out.cell(row=row_index, column=column_index).value = row.get("manual_value")
 
     if include_sheets_from_source_only:
+        wb_source = workbooks[source_key]
         for sheet in wb_source.sheetnames:
             if sheet in wb_out.sheetnames:
                 continue

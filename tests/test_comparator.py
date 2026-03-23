@@ -158,7 +158,7 @@ def test_apply_decisions_merges_changes(tmp_path: Path):
     _create_wb(b, {"Datos": {"A1": "hola", "A2": "nuevo"}, "Nueva": {"A1": 99}})
 
     diff = compare_workbooks(a, b)
-    df = diffs_to_dataframe(diff.all_differences())
+    df = diffs_to_dataframe(diff.all_differences(), default_action="use_b")
 
     output = tmp_path / "out.xlsx"
     apply_decisions(a, df, output, b, base="a")
