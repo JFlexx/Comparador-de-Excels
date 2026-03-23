@@ -167,9 +167,7 @@ La experiencia objetivo no es “subir dos Excels a una web”, sino **resolver 
 
 #### Comparación por coordenadas
 
-```bash
-python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base a --template decisiones.xlsx
-```
+### Merge final
 
 #### Comparación por filas con claves por hoja
 
@@ -199,18 +197,25 @@ Esto genera un Excel con:
 
 ### Generar el libro combinado
 
-#### Traer cambios de B hacia A
+1. **Seleccionar libro base y libro origen**
+   - `select_workbooks(...)`
+2. **Comparar**
+   - `compare(contract)` o `compare_payload(payload)`
+3. **Cargar tabla de decisiones en una hoja de trabajo**
+   - `load_decision_table_into_workbook(comparison, target)`
+4. **Volver a leer decisiones desde Excel**
+   - `read_decisions_from_workbook(target)`
+5. **Ejecutar merge final**
+   - `execute_merge(contract)`
+
+---
+
+## Instalación
 
 ```bash
-python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base a --template decisiones_b_hacia_a.xlsx
-python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones_b_hacia_a.xlsx --apply-onto a --output resultado_b_hacia_a.xlsx
-```
-
-#### Traer cambios de A hacia B
-
-```bash
-python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base b --template decisiones_a_hacia_b.xlsx
-python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones_a_hacia_b.xlsx --apply-onto b --output resultado_a_hacia_b.xlsx
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## Streamlit como compatibilidad / legado
