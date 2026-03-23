@@ -13,6 +13,7 @@ from comparator import (
     compare_workbooks,
     decisions_from_excel,
     export_decision_template,
+    source_action_for_base,
 )
 
 
@@ -121,6 +122,19 @@ path_a.write_bytes(file_a.getbuffer())
 path_b.write_bytes(file_b.getbuffer())
 
 diff = compare_workbooks(path_a, path_b, options=options)
+merge_direction = st.radio(
+    "Dirección del merge",
+    options=["a", "b"],
+    horizontal=True,
+    format_func=lambda value: (
+        f"Traer cambios de B hacia A ({file_b.name} ⟶ {file_a.name})"
+        if value == "a"
+        else f"Traer cambios de A hacia B ({file_a.name} ⟶ {file_b.name})"
+    ),
+)
+base_label = "A" if merge_direction == "a" else "B"
+source_label = "B" if merge_direction == "a" else "A"
+default_action = source_action_for_base(merge_direction)
 comparison_signature = (
     file_a.name,
     file_a.size,
@@ -129,6 +143,7 @@ comparison_signature = (
     options.strip_strings,
     options.case_sensitive,
     options.ignore_empty_string_vs_none,
+    merge_direction,
 )
 
 st.subheader("Resumen")
@@ -151,7 +166,7 @@ web_tab, excel_tab = st.tabs(["🖥️ Resolver en web", "📗 Resolver en Excel
 
 with web_tab:
     if st.session_state.get("comparison_signature") != comparison_signature:
-        decisions_df = diff.to_dataframe()
+        decisions_df = diff.to_dataframe(default_action=default_action)
         if not decisions_df.empty:
             decisions_df["value_a_display"] = decisions_df["value_a"].map(_format_value)
             decisions_df["value_b_display"] = decisions_df["value_b"].map(_format_value)
@@ -168,7 +183,7 @@ with web_tab:
     else:
         pending_count = int((~master_df["reviewed"]).sum())
         manual_count = int((master_df["action"] == "manual").sum())
-        use_b_count = int((master_df["action"] == "use_b").sum())
+        source_action_count = int((master_df["action"] == default_action).sum())
 
         st.write(
             "Edita las decisiones agrupadas por hoja. Puedes marcar una fila como revisada "
@@ -176,7 +191,7 @@ with web_tab:
         )
         info1, info2, info3 = st.columns(3)
         info1.metric("Pendientes de revisión", pending_count)
-        info2.metric("Acción use_b", use_b_count)
+        info2.metric(f"Acción {default_action}", source_action_count)
         info3.metric("Acción manual", manual_count)
 
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
@@ -258,7 +273,14 @@ with web_tab:
 
         if st.button("Generar Excel combinado (web)"):
             output_path = temp_dir / output_name
-            result = apply_decisions(path_a, master_df, output_path, path_b, include_sheets_only_in_b=include_extra)
+            result = apply_decisions(
+                path_a,
+                master_df,
+                output_path,
+                path_b,
+                base=merge_direction,
+                include_sheets_from_source_only=include_extra,
+            )
             st.success("Archivo combinado generado.")
             st.download_button(
                 label="Descargar resultado",
