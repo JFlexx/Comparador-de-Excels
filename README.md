@@ -128,10 +128,72 @@ pytest -q
 
 ## Arquitectura
 
-- `comparator.py`: lógica de comparación, export/import de decisiones y aplicación de merge.
-- `app.py`: interfaz web en Streamlit.
-- `excel_tool.py`: CLI para flujo Excel-first.
-- `tests/test_comparator.py`: pruebas unitarias.
+- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`.
+- `interface_adapter.py`: capa adaptadora para interfaces. Centraliza parsing de opciones, etiquetas de dirección de merge, DataFrames de revisión y llamadas al servicio.
+- `app.py`: interfaz web en Streamlit; solo orquesta UI y delega en la capa adaptadora.
+- `excel_tool.py`: CLI para flujo Excel-first; solo interpreta argumentos y delega en la capa adaptadora.
+- `tests/test_comparator.py`: pruebas unitarias del núcleo y de los contratos principales.
+
+## Arquitectura objetivo
+
+El objetivo es que **cualquier interfaz corporativa futura** consuma el núcleo de `comparator.py` en lugar de reimplementar lógica de negocio. Eso incluye:
+
+- add-ins de Excel,
+- APIs internas,
+- automatizaciones batch,
+- portales web o backoffices.
+
+### Regla de diseño
+
+Las interfaces deben limitarse a:
+
+1. capturar archivos y parámetros del usuario,
+2. convertir esos parámetros al contrato del motor,
+3. invocar el servicio del comparador,
+4. presentar o persistir el resultado.
+
+La comparación, la construcción del DataFrame de decisiones válido, la exportación/importación de plantillas y la ejecución del merge final deben residir en `comparator.py`.
+
+### Contratos del núcleo
+
+#### `compare_workbooks(path_a, path_b, options)`
+
+- **Entrada:** rutas de libros Excel y un `CompareOptions`.
+- **Salida:** `WorkbookDiff` con `only_in_a`, `only_in_b`, `common_sheets`, `differences`, `grouped_differences` y `total_differences`.
+- **Modo `coordinate`:** compara celda a celda por fila/columna exacta.
+- **Modo `row-based`:** compara registros usando `header_row` y `sheet_keys`. Si una hoja no tiene clave configurada, usa la fila completa como identidad implícita.
+
+#### `export_decision_template(diff, output_path, default_action)`
+
+- **Entrada:** un `WorkbookDiff`, una ruta de salida y una acción por defecto válida.
+- **Salida:** archivo Excel con hoja `Decisiones` y hoja `Resumen`.
+- **Contrato de decisiones:** la hoja `Decisiones` usa columnas estables como `sheet`, `row`, `column`, `header`, `key`, `diff_type`, `action`, `manual_value` y `reviewed`.
+
+#### `decisions_from_excel(path)`
+
+- **Entrada:** ruta a una plantilla editada.
+- **Salida:** `pandas.DataFrame` normalizado, con columnas estándar del motor.
+- **Acciones válidas:** `use_a`, `use_b`, `manual`.
+
+#### `apply_decisions(workbook_a, decisions, output_path, workbook_b, base)`
+
+- **Entrada:** dos rutas de libros, un DataFrame de decisiones y la base de merge (`a` o `b`).
+- **Salida:** libro combinado en `output_path`.
+- **Semántica de acciones:**
+  - `use_a`: conserva el valor de A.
+  - `use_b`: conserva el valor de B.
+  - `manual`: escribe `manual_value`.
+
+### Puntos de integración para un futuro add-in
+
+Un add-in de Excel o una API interna necesitaría, como mínimo, estos puntos de integración:
+
+1. **Cargar libro base y libro fuente** desde disco, memoria o almacenamiento corporativo.
+2. **Invocar la comparación** con `compare_workbooks` o `ComparatorService.compare`.
+3. **Mostrar/editar decisiones** sobre el DataFrame estándar o una representación equivalente de la hoja `Decisiones`.
+4. **Persistir o rehidratar decisiones** usando `export_decision_template` / `decisions_from_excel`.
+5. **Solicitar el merge final** con `apply_decisions` o `ComparatorService.apply_decisions`, indicando si el resultado se construye sobre A o sobre B.
+6. **Gestionar hojas exclusivas** del libro origen según la política del canal (`include_sheets_from_source_only`).
 
 ## Notas
 

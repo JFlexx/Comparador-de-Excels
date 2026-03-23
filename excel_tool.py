@@ -3,76 +3,64 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from comparator import (
-    CompareOptions,
-    VALID_COMPARE_MODES,
-    apply_decisions,
-    compare_workbooks,
-    decisions_from_excel,
-    export_decision_template,
+from comparator import VALID_ACTIONS, VALID_COMPARE_MODES
+from interface_adapter import (
+    build_compare_options,
+    compare_files,
+    default_action_for_base,
+    load_decisions,
+    merge_labels,
+    merge_workbooks,
+    parse_sheet_keys_args,
+    export_template,
 )
 
 
-def _parse_sheet_keys(values: list[str] | None) -> dict[str, list[str]]:
-    sheet_keys: dict[str, list[str]] = {}
-    for raw_value in values or []:
-        if '=' not in raw_value:
-            raise ValueError(
-                "Cada --sheet-key debe usar el formato Hoja=columna1,columna2"
-            )
-        sheet_name, raw_columns = raw_value.split('=', 1)
-        columns = [column.strip() for column in raw_columns.split(',') if column.strip()]
-        if not sheet_name.strip() or not columns:
-            raise ValueError(
-                "Cada --sheet-key debe incluir nombre de hoja y al menos una columna clave"
-            )
-        sheet_keys[sheet_name.strip()] = columns
-    return sheet_keys
-
-
 def cmd_compare(args: argparse.Namespace) -> int:
-    options = CompareOptions(
-        strip_strings=not args.keep_spaces,
-        case_sensitive=not args.ignore_case,
-        ignore_empty_string_vs_none=not args.empty_string_is_value,
+    options = build_compare_options(
         compare_mode=args.compare_mode,
-        sheet_keys=_parse_sheet_keys(args.sheet_key),
+        ignore_case=args.ignore_case,
+        keep_spaces=args.keep_spaces,
+        empty_string_is_value=args.empty_string_is_value,
         header_row=args.header_row,
+        sheet_keys=parse_sheet_keys_args(args.sheet_key),
     )
-    diff = compare_workbooks(args.a, args.b, options=options)
+    diff = compare_files(args.a, args.b, options)
 
     template_path = Path(args.template)
-    default_action = args.default_action or source_action_for_base(args.base)
-    export_decision_template(diff, template_path, default_action=default_action)
+    default_action = args.default_action or default_action_for_base(args.base)
+    export_template(diff, template_path, base=args.base, default_action=default_action)
 
-    source = "B" if args.base == "a" else "A"
+    labels = merge_labels(args.base)
     print("Comparación completada.")
     print(f"- Modo: {args.compare_mode}")
     print(f"- Hojas en común: {len(diff.common_sheets)}")
     print(f"- Hojas solo en A: {len(diff.only_in_a)}")
     print(f"- Hojas solo en B: {len(diff.only_in_b)}")
-    print(f"- Diferencias: {len(diff.all_differences())}")
+    print(f"- Diferencias: {diff.total_differences}")
+    print(f"- Merge objetivo: traer cambios de {labels.source} hacia {labels.base}")
+    print(f"- Acción por defecto: {default_action}")
     print(f"Plantilla de decisiones creada: {template_path}")
     return 0
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    decisions = decisions_from_excel(args.decisions)
+    decisions = load_decisions(args.decisions)
     output_path = Path(args.output)
 
-    apply_decisions(
+    merge_workbooks(
         workbook_a=args.a,
+        workbook_b=args.b,
         decisions=decisions,
         output_path=output_path,
-        workbook_b=args.b,
         base=args.apply_onto,
         include_sheets_from_source_only=not args.no_copy_extra_sheets,
     )
 
-    source = "B" if args.apply_onto == "a" else "A"
+    labels = merge_labels(args.apply_onto)
     print(f"Libro combinado generado: {output_path}")
-    print(f"- Base destino: {args.apply_onto.upper()}")
-    print(f"- Se aplicaron decisiones para traer cambios de {source}")
+    print(f"- Base destino: {labels.base}")
+    print(f"- Se aplicaron decisiones para traer cambios de {labels.source}")
     return 0
 
 
@@ -90,8 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="a",
         help="Libro que se considera base/destino al revisar decisiones (por defecto: A)",
     )
-    compare.add_argument("--a", required=True, help="Ruta de Excel A (base)")
-    compare.add_argument("--b", required=True, help="Ruta de Excel B (comparar)")
+    compare.add_argument("--a", required=True, help="Ruta de Excel A")
+    compare.add_argument("--b", required=True, help="Ruta de Excel B")
     compare.add_argument(
         "--template",
         default="decisiones.xlsx",
@@ -99,9 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument(
         "--default-action",
-        choices=["use_a", "use_b", "manual"],
+        choices=sorted(VALID_ACTIONS),
         default=None,
-        help="Acción por defecto para cada diferencia (si se omite, se usa la del libro origen según --base)",
+        help="Acción por defecto para cada diferencia; si se omite, se usa la del libro origen según --base",
     )
     compare.add_argument(
         "--compare-mode",
@@ -130,8 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.set_defaults(func=cmd_compare)
 
     merge = sub.add_parser("merge", help="Aplica decisiones y genera el libro final")
-    merge.add_argument("--a", required=True, help="Ruta de Excel A (base)")
-    merge.add_argument("--b", required=True, help="Ruta de Excel B (comparar)")
+    merge.add_argument("--a", required=True, help="Ruta de Excel A")
+    merge.add_argument("--b", required=True, help="Ruta de Excel B")
     merge.add_argument("--decisions", required=True, help="Excel de decisiones editado")
     merge.add_argument(
         "--apply-onto",
