@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
 from comparator import (
@@ -147,6 +148,7 @@ def test_diffs_to_dataframe_exposes_stable_contract_columns(tmp_path: Path):
     df = diffs_to_dataframe(diff.all_differences())
 
     assert list(df.columns) == DECISION_COLUMNS
+    assert df.iloc[0]["decision_id"] == "Datos|A1|modified"
     assert df.iloc[0]["diff_type"] == "modified"
 
 
@@ -202,7 +204,130 @@ def test_export_and_read_decisions_template(tmp_path: Path):
     assert loaded.shape[0] == 1
     assert loaded.iloc[0]["action"] == "use_b"
     assert loaded.iloc[0]["sheet"] == "Datos"
+    assert loaded.iloc[0]["decision_id"] == "Datos|A1|modified"
     assert loaded.iloc[0]["diff_type"] == "modified"
+
+
+def test_excel_round_trip_supports_manual_override_and_merge(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    template = tmp_path / "decisiones.xlsx"
+    output = tmp_path / "merge.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "ID", "B1": "Estado", "A2": 1, "B2": "base"}})
+    _create_wb(b, {"Datos": {"A1": "ID", "B1": "Estado", "A2": 1, "B2": "nuevo"}})
+
+    diff = compare_workbooks(a, b)
+    export_decision_template(diff, template)
+
+    wb_template = load_workbook(template)
+    ws = wb_template["Decisiones"]
+    action_column = DECISION_COLUMNS.index("action") + 1
+    manual_column = DECISION_COLUMNS.index("manual_value") + 1
+    ws.cell(row=2, column=action_column).value = "manual"
+    ws.cell(row=2, column=manual_column).value = "forzado"
+    wb_template.save(template)
+
+    decisions = decisions_from_excel(template)
+    assert decisions.iloc[0]["action"] == "manual"
+    assert decisions.iloc[0]["manual_value"] == "forzado"
+
+    apply_decisions(a, decisions, output, b, base="a")
+
+    wb_out = load_workbook(output)
+    assert wb_out["Datos"]["B2"].value == "forzado"
+
+
+def test_decision_template_exports_excel_controls_and_protection(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    template = tmp_path / "decisiones.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "x"}})
+    _create_wb(b, {"Datos": {"A1": "y"}})
+
+    export_decision_template(compare_workbooks(a, b), template)
+
+    ws = load_workbook(template)["Decisiones"]
+    validations = list(ws.data_validations.dataValidation)
+
+    assert ws.freeze_panes == "A2"
+    assert ws.protection.sheet is True
+    assert len(validations) == 1
+    assert validations[0].formula1 == '"use_a,use_b,manual"'
+    assert validations[0].sqref == "M2:M2"
+    assert ws["M2"].protection.locked is False
+    assert ws["N2"].protection.locked is False
+    assert ws["O2"].protection.locked is False
+    assert ws["A2"].protection.locked is True
+
+
+def test_decisions_from_excel_rejects_missing_required_column(tmp_path: Path):
+    template = tmp_path / "decisiones.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Decisiones"
+    ws.append([column for column in DECISION_COLUMNS if column != "decision_id"])
+    ws.append(["Datos", "A1", 1, 1, "A", "ctx", "h", "k", "modified", "x", "y", "use_b", None, False])
+    wb.save(template)
+
+    with pytest.raises(ValueError, match="columnas requeridas"):
+        decisions_from_excel(template)
+
+
+def test_decisions_from_excel_rejects_duplicate_decision_id(tmp_path: Path):
+    template = tmp_path / "decisiones.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Decisiones"
+    ws.append(DECISION_COLUMNS)
+    row = [
+        "Datos",
+        "A1",
+        "repetido",
+        1,
+        1,
+        "A",
+        "ctx",
+        "h",
+        "k",
+        "modified",
+        "x",
+        "y",
+        "use_b",
+        None,
+        False,
+    ]
+    ws.append(row)
+    ws.append(row)
+    wb.save(template)
+
+    with pytest.raises(ValueError, match="decision_id duplicados"):
+        decisions_from_excel(template)
+
+
+@pytest.mark.parametrize(
+    ("column_name", "value", "message"),
+    [
+        ("action", "romper", "Acciones no válidas"),
+        ("row", "fila-dos", "columna 'row'"),
+        ("sheet", "   ", "hoja válida"),
+        ("decision_id", None, "decision_id"),
+    ],
+)
+def test_validate_decisions_dataframe_rejects_controlled_corruption(column_name: str, value: object, message: str):
+    invalid = diffs_to_dataframe([])
+    invalid.loc[0] = [None] * len(DECISION_COLUMNS)
+    invalid.loc[0, "sheet"] = "Datos"
+    invalid.loc[0, "cell"] = "A1"
+    invalid.loc[0, "decision_id"] = "Datos|A1|modified"
+    invalid.loc[0, "row"] = 1
+    invalid.loc[0, "column"] = 1
+    invalid.loc[0, "action"] = "use_b"
+    invalid.loc[0, column_name] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_decisions_dataframe(invalid)
 
 
 def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):
@@ -227,22 +352,6 @@ def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):
 
     wb = load_workbook(result)
     assert wb["Datos"]["A1"].value == "source"
-
-
-def test_validate_decisions_dataframe_rejects_invalid_actions():
-    invalid = diffs_to_dataframe([])
-    invalid.loc[0] = [None] * len(DECISION_COLUMNS)
-    invalid.loc[0, "sheet"] = "Datos"
-    invalid.loc[0, "row"] = 1
-    invalid.loc[0, "column"] = 1
-    invalid.loc[0, "action"] = "romper"
-
-    try:
-        validate_decisions_dataframe(invalid)
-    except ValueError as exc:
-        assert "Acciones no válidas" in str(exc)
-    else:
-        raise AssertionError("Se esperaba ValueError por acción inválida")
 
 
 def test_interface_adapter_parsers_and_option_builder():
