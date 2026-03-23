@@ -17,6 +17,8 @@ from comparator import (
     validate_decisions_dataframe,
 )
 from interface_adapter import build_compare_options, parse_sheet_keys_args, parse_sheet_keys_block
+from excel_addin_adapter import ExcelAddinAdapter
+from excel_integration_contracts import ExcelCompareContract, ExcelDecisionSheetContract, ExcelMergeContract
 
 
 def _create_wb(path: Path, sheets: dict[str, dict[str, object]]):
@@ -411,3 +413,98 @@ def test_interface_adapter_parsers_and_option_builder():
     assert options.compare_mode == "row-based"
     assert options.case_sensitive is False
     assert options.header_row == 2
+
+
+def test_excel_addin_adapter_supports_compare_sheet_roundtrip_and_merge(tmp_path: Path):
+    adapter = ExcelAddinAdapter()
+    base = tmp_path / "base.xlsx"
+    source = tmp_path / "source.xlsx"
+    host = tmp_path / "host.xlsx"
+    output = tmp_path / "merged_from_adapter.xlsx"
+
+    _create_wb(base, {"Datos": {"A1": "hola", "A2": "base"}})
+    _create_wb(source, {"Datos": {"A1": "hola", "A2": "source"}, "Nueva": {"A1": 7}})
+    _create_wb(host, {"Inicio": {"A1": "placeholder"}})
+
+    selection = adapter.select_workbooks(
+        base_workbook_path=base,
+        source_workbook_path=source,
+        base_side="a",
+    )
+    comparison = adapter.compare(ExcelCompareContract(selection=selection))
+
+    assert comparison.route == adapter.integration_route
+    assert comparison.only_in_base == []
+    assert comparison.only_in_source == ["Nueva"]
+    assert comparison.decision_rows[0].action == "use_b"
+
+    sheet_contract = ExcelDecisionSheetContract.create(host, sheet_name="DecisionTable")
+    load_result = adapter.load_decision_table_into_workbook(comparison, sheet_contract)
+    assert load_result.rows_written == 1
+
+    loaded = adapter.read_decisions_from_workbook(sheet_contract)
+    assert loaded.rows_loaded == 1
+    assert loaded.decisions[0].sheet == "Datos"
+
+    merge_result = adapter.execute_merge(
+        ExcelMergeContract.create(
+            selection=selection,
+            decisions_workbook_path=host,
+            decisions_sheet_name="DecisionTable",
+            output_path=output,
+        )
+    )
+    merged = load_workbook(merge_result.output_path)
+    assert merged["Datos"]["A2"].value == "source"
+    assert merged["Nueva"]["A1"].value == 7
+
+
+def test_excel_addin_adapter_payload_contract_is_serializable(tmp_path: Path):
+    adapter = ExcelAddinAdapter()
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    decisions_host = tmp_path / "decisions_host.xlsx"
+    out = tmp_path / "out.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "uno"}})
+    _create_wb(b, {"Datos": {"A1": "dos"}})
+    _create_wb(decisions_host, {"Inicio": {"A1": "x"}})
+
+    comparison_payload = adapter.compare_payload(
+        {
+            "selection": {
+                "base_workbook_path": str(a),
+                "source_workbook_path": str(b),
+                "base_side": "a",
+            },
+            "compare_mode": "coordinate",
+        }
+    )
+    assert comparison_payload["total_differences"] == 1
+    assert comparison_payload["decision_rows"][0]["action"] == "use_b"
+
+    load_payload = adapter.load_decision_table_payload(
+        comparison_payload,
+        {"workbook_path": str(decisions_host), "sheet_name": "DecisionTable"},
+    )
+    assert load_payload["rows_written"] == 1
+
+    decisions_payload = adapter.read_decisions_payload(
+        {"workbook_path": str(decisions_host), "sheet_name": "DecisionTable"}
+    )
+    assert decisions_payload["rows_loaded"] == 1
+
+    merge_payload = adapter.execute_merge_payload(
+        {
+            "selection": {
+                "base_workbook_path": str(a),
+                "source_workbook_path": str(b),
+                "base_side": "a",
+            },
+            "decisions_workbook_path": str(decisions_host),
+            "decisions_sheet_name": "DecisionTable",
+            "output_path": str(out),
+        }
+    )
+    wb = load_workbook(merge_payload["output_path"])
+    assert wb["Datos"]["A1"].value == "dos"

@@ -33,11 +33,17 @@ DISPLAY_COLUMNS = [
 ]
 EDITABLE_COLUMNS = ["action", "manual_value", "reviewed"]
 
-st.set_page_config(page_title="Comparador de Excels", layout="wide")
-st.title("📘 Comparador de libros Excel (multi-hoja)")
+st.set_page_config(page_title="Comparador de Excels · Legacy Demo", layout="wide")
+st.title("📘 Comparador de libros Excel (legacy/demo Streamlit)")
 st.caption(
-    "La interfaz Streamlit consume el núcleo estable en comparator.py mediante una capa adaptadora. "
-    "Esto facilita reutilizar el motor desde futuras interfaces corporativas."
+    "La interfaz principal objetivo es Excel Desktop mediante un add-in. "
+    "Esta pantalla Streamlit queda como demo/soporte secundario y consume el mismo motor en comparator.py "
+    "mediante una capa adaptadora."
+)
+
+st.warning(
+    "Interfaz legacy/demo: para operación habitual se recomienda la integración Excel Desktop. "
+    "Usa esta UI solo como apoyo técnico o validación rápida."
 )
 
 with st.sidebar:
