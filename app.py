@@ -6,47 +6,24 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from comparator import (
-    CompareOptions,
-    VALID_COMPARE_MODES,
-    apply_decisions,
-    compare_workbooks,
-    decisions_from_excel,
-    export_decision_template,
-    source_action_for_base,
+from comparator import VALID_COMPARE_MODES
+from interface_adapter import (
+    build_compare_options,
+    build_review_dataframe,
+    compare_files,
+    default_action_for_base,
+    export_template,
+    load_decisions,
+    merge_labels,
+    merge_workbooks,
+    parse_sheet_keys_block,
 )
-
-
-def _parse_sheet_keys(raw_value: str) -> dict[str, list[str]]:
-    sheet_keys: dict[str, list[str]] = {}
-    for line in raw_value.splitlines():
-        cleaned = line.strip()
-        if not cleaned:
-            continue
-        if ':' not in cleaned:
-            raise ValueError(
-                "Cada línea debe usar el formato Hoja:columna1,columna2"
-            )
-        sheet_name, raw_columns = cleaned.split(':', 1)
-        columns = [column.strip() for column in raw_columns.split(',') if column.strip()]
-        if not sheet_name.strip() or not columns:
-            raise ValueError(
-                "Cada línea debe incluir nombre de hoja y al menos una columna clave"
-            )
-        sheet_keys[sheet_name.strip()] = columns
-    return sheet_keys
-
-
-st.set_page_config(page_title="Comparador de Excels", layout="wide")
-st.title("📘 Comparador de libros Excel (multi-hoja)")
-st.caption(
-    "Compara dos libros completos y resuelve diferencias por celda o por registros. "
-    "Incluye flujo Web (Streamlit) y flujo Excel nativo (plantilla editable)."
-)
-
 
 DISPLAY_COLUMNS = [
     "context",
+    "header",
+    "key",
+    "diff_type",
     "value_a_display",
     "value_b_display",
     "preview",
@@ -56,25 +33,28 @@ DISPLAY_COLUMNS = [
 ]
 EDITABLE_COLUMNS = ["action", "manual_value", "reviewed"]
 
-
-def _format_value(value: object) -> str:
-    if value is None:
-        return "∅"
-    if value == "":
-        return "''"
-    return str(value)
-
+st.set_page_config(page_title="Comparador de Excels", layout="wide")
+st.title("📘 Comparador de libros Excel (multi-hoja)")
+st.caption(
+    "La interfaz Streamlit consume el núcleo estable en comparator.py mediante una capa adaptadora. "
+    "Esto facilita reutilizar el motor desde futuras interfaces corporativas."
+)
 
 with st.sidebar:
     st.header("Opciones de comparación")
     compare_mode = st.selectbox(
         "Modo de comparación",
-        options=list(VALID_COMPARE_MODES),
+        options=sorted(VALID_COMPARE_MODES),
         format_func=lambda value: "Por coordenadas" if value == "coordinate" else "Por filas/estructura",
         help=(
             "Por coordenadas compara celda contra celda. "
             "Por filas usa encabezados y columnas clave para detectar altas, bajas y cambios sin cascadas."
         ),
+    )
+    merge_direction = st.radio(
+        "Libro base del merge final",
+        options=["a", "b"],
+        format_func=lambda value: "Construir resultado sobre A" if value == "a" else "Construir resultado sobre B",
     )
     ignore_case = st.checkbox("Ignorar mayúsculas/minúsculas", value=False)
     keep_spaces = st.checkbox("No recortar espacios", value=False)
@@ -91,19 +71,21 @@ with st.sidebar:
     )
 
 try:
-    sheet_keys = _parse_sheet_keys(sheet_keys_raw)
+    sheet_keys = parse_sheet_keys_block(sheet_keys_raw)
+    options = build_compare_options(
+        compare_mode=compare_mode,
+        ignore_case=ignore_case,
+        keep_spaces=keep_spaces,
+        empty_string_is_value=empty_string_is_value,
+        header_row=int(header_row),
+        sheet_keys=sheet_keys,
+    )
 except ValueError as exc:
     st.sidebar.error(str(exc))
     st.stop()
 
-options = CompareOptions(
-    strip_strings=not keep_spaces,
-    case_sensitive=not ignore_case,
-    ignore_empty_string_vs_none=not empty_string_is_value,
-    compare_mode=compare_mode,
-    sheet_keys=sheet_keys,
-    header_row=int(header_row),
-)
+labels = merge_labels(merge_direction)
+default_action = default_action_for_base(merge_direction)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -121,25 +103,15 @@ path_b = temp_dir / file_b.name
 path_a.write_bytes(file_a.getbuffer())
 path_b.write_bytes(file_b.getbuffer())
 
-diff = compare_workbooks(path_a, path_b, options=options)
-merge_direction = st.radio(
-    "Dirección del merge",
-    options=["a", "b"],
-    horizontal=True,
-    format_func=lambda value: (
-        f"Traer cambios de B hacia A ({file_b.name} ⟶ {file_a.name})"
-        if value == "a"
-        else f"Traer cambios de A hacia B ({file_a.name} ⟶ {file_b.name})"
-    ),
-)
-base_label = "A" if merge_direction == "a" else "B"
-source_label = "B" if merge_direction == "a" else "A"
-default_action = source_action_for_base(merge_direction)
+diff = compare_files(path_a, path_b, options)
 comparison_signature = (
     file_a.name,
     file_a.size,
     file_b.name,
     file_b.size,
+    options.compare_mode,
+    options.header_row,
+    tuple(sorted((sheet, tuple(columns)) for sheet, columns in options.sheet_keys.items())),
     options.strip_strings,
     options.case_sensitive,
     options.ignore_empty_string_vs_none,
@@ -152,6 +124,11 @@ m1.metric("Hojas en común", len(diff.common_sheets))
 m2.metric("Hojas solo en A", len(diff.only_in_a))
 m3.metric("Hojas solo en B", len(diff.only_in_b))
 m4.metric("Diferencias", diff.total_differences)
+
+st.caption(
+    f"Merge objetivo: traer cambios de {labels.source} hacia {labels.base}. "
+    f"Acción por defecto de la plantilla: {default_action}."
+)
 
 if diff.only_in_a:
     st.warning(f"Hojas solo en A: {', '.join(diff.only_in_a)}")
@@ -166,15 +143,8 @@ web_tab, excel_tab = st.tabs(["🖥️ Resolver en web", "📗 Resolver en Excel
 
 with web_tab:
     if st.session_state.get("comparison_signature") != comparison_signature:
-        decisions_df = diff.to_dataframe(default_action=default_action)
-        if not decisions_df.empty:
-            decisions_df["value_a_display"] = decisions_df["value_a"].map(_format_value)
-            decisions_df["value_b_display"] = decisions_df["value_b"].map(_format_value)
-            decisions_df["preview"] = decisions_df.apply(
-                lambda row: f"🅰️ {row['value_a_display']} ⟶ 🅱️ {row['value_b_display']}", axis=1
-            )
         st.session_state["comparison_signature"] = comparison_signature
-        st.session_state["decisions_df"] = decisions_df
+        st.session_state["decisions_df"] = build_review_dataframe(diff, default_action=default_action)
 
     master_df = st.session_state["decisions_df"]
 
@@ -183,15 +153,15 @@ with web_tab:
     else:
         pending_count = int((~master_df["reviewed"]).sum())
         manual_count = int((master_df["action"] == "manual").sum())
-        source_action_count = int((master_df["action"] == default_action).sum())
+        source_count = int((master_df["action"] == default_action).sum())
 
         st.write(
-            "Edita las decisiones agrupadas por hoja. Puedes marcar una fila como revisada "
-            "sin cambiar todavía la acción final."
+            "Edita las decisiones agrupadas por hoja. La UI sólo modifica el DataFrame de revisión; "
+            "el merge final siempre lo ejecuta el núcleo."
         )
         info1, info2, info3 = st.columns(3)
         info1.metric("Pendientes de revisión", pending_count)
-        info2.metric(f"Acción {default_action}", source_action_count)
+        info2.metric(f"Acción {default_action}", source_count)
         info3.metric("Acción manual", manual_count)
 
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
@@ -199,11 +169,7 @@ with web_tab:
         available_columns = sorted(master_df["column_letter"].unique().tolist())
 
         with filter_col1:
-            selected_sheets = st.multiselect(
-                "Filtrar por hoja",
-                options=available_sheets,
-                default=available_sheets,
-            )
+            selected_sheets = st.multiselect("Filtrar por hoja", options=available_sheets, default=available_sheets)
         with filter_col2:
             selected_columns = st.multiselect(
                 "Filtrar por columna",
@@ -255,11 +221,16 @@ with web_tab:
                         num_rows="fixed",
                         column_config={
                             "context": st.column_config.TextColumn("Coordenada y contexto", disabled=True),
+                            "header": st.column_config.TextColumn("Header", disabled=True),
+                            "key": st.column_config.TextColumn("Clave registro", disabled=True),
+                            "diff_type": st.column_config.TextColumn("Tipo diff", disabled=True),
                             "value_a_display": st.column_config.TextColumn("Valor en A", disabled=True),
                             "value_b_display": st.column_config.TextColumn("Valor en B", disabled=True),
                             "preview": st.column_config.TextColumn("Previsualización", disabled=True),
                             "action": st.column_config.SelectboxColumn(
-                                "Acción", options=["use_a", "use_b", "manual"], required=True
+                                "Acción",
+                                options=["use_a", "use_b", "manual"],
+                                required=True,
                             ),
                             "manual_value": st.column_config.TextColumn("Valor manual"),
                             "reviewed": st.column_config.CheckboxColumn("Revisada"),
@@ -268,37 +239,43 @@ with web_tab:
                     )
                     master_df.loc[edited_sheet.index, EDITABLE_COLUMNS] = edited_sheet[EDITABLE_COLUMNS]
 
-        include_extra = st.checkbox(f"Copiar hojas solo existentes en {source_label}", value=True)
-        output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
+        if compare_mode == "row-based":
+            st.info(
+                "El modo row-based está orientado a revisión/auditoría. "
+                "La fusión automática final queda reservada al modo coordinate."
+            )
+        else:
+            include_extra = st.checkbox(f"Copiar hojas solo existentes en {labels.source}", value=True)
+            output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
 
-        if st.button("Generar Excel combinado (web)"):
-            output_path = temp_dir / output_name
-            result = apply_decisions(
-                path_a,
-                master_df,
-                output_path,
-                path_b,
-                base=merge_direction,
-                include_sheets_from_source_only=include_extra,
-            )
-            st.success("Archivo combinado generado.")
-            st.download_button(
-                label="Descargar resultado",
-                data=result.read_bytes(),
-                file_name=output_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            if st.button("Generar Excel combinado (web)"):
+                output_path = temp_dir / output_name
+                result = merge_workbooks(
+                    workbook_a=path_a,
+                    workbook_b=path_b,
+                    decisions=master_df,
+                    output_path=output_path,
+                    base=merge_direction,
+                    include_sheets_from_source_only=include_extra,
+                )
+                st.success("Archivo combinado generado.")
+                st.download_button(
+                    label="Descargar resultado",
+                    data=result.read_bytes(),
+                    file_name=output_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
 with excel_tab:
     st.write(
         "Flujo recomendado si quieres trabajar dentro de Excel: "
-        f"1) elige si quieres traer cambios de {source_label} hacia {base_label}, "
-        "2) descarga plantilla de decisiones, 3) edítala en Excel, 4) súbela y genera resultado."
+        f"1) comparar, 2) descargar plantilla con acción por defecto para traer cambios de {labels.source} hacia {labels.base}, "
+        "3) editar decisiones, 4) subir plantilla y solicitar el merge final."
     )
 
     template_name = st.text_input("Nombre plantilla", "decisiones.xlsx")
     template_path = temp_dir / template_name
-    export_decision_template(diff, template_path, default_action=default_action)
+    export_template(diff, template_path, base=merge_direction, default_action=default_action)
     st.download_button(
         label="Descargar plantilla de decisiones",
         data=template_path.read_bytes(),
@@ -311,25 +288,25 @@ with excel_tab:
         type=["xlsx", "xlsm"],
         key="decisions_excel",
     )
-    include_extra_excel = st.checkbox(f"Copiar hojas solo en {source_label} (flujo Excel)", value=True)
+    include_extra_excel = st.checkbox(f"Copiar hojas solo en {labels.source} (flujo Excel)", value=True)
     output_name_excel = st.text_input("Nombre salida (flujo Excel)", "resultado_excel_flow.xlsx")
 
     if compare_mode == "row-based":
         st.info(
-            "La plantilla exportada en modo por filas sirve para revisar diferencias por registro. "
-            "La fusión automática desde plantilla queda reservada al modo por coordenadas."
+            "La plantilla exportada en modo row-based sirve para revisar diferencias por registro. "
+            "La fusión automática desde plantilla queda reservada al modo coordinate."
         )
     elif decisions_file and st.button("Generar Excel combinado (desde plantilla Excel)"):
         decisions_path = temp_dir / decisions_file.name
         decisions_path.write_bytes(decisions_file.getbuffer())
 
-        decisions_df = decisions_from_excel(decisions_path)
+        decisions_df = load_decisions(decisions_path)
         output_path = temp_dir / output_name_excel
-        result = apply_decisions(
-            path_a,
-            decisions_df,
-            output_path,
-            path_b,
+        result = merge_workbooks(
+            workbook_a=path_a,
+            workbook_b=path_b,
+            decisions=decisions_df,
+            output_path=output_path,
             base=merge_direction,
             include_sheets_from_source_only=include_extra_excel,
         )

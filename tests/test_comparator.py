@@ -4,12 +4,19 @@ from openpyxl import Workbook, load_workbook
 
 from comparator import (
     CompareOptions,
+    ComparisonRequest,
+    DECISION_COLUMNS,
+    MergeRequest,
+    SERVICE,
     apply_decisions,
     compare_workbooks,
     decisions_from_excel,
     diffs_to_dataframe,
     export_decision_template,
+    source_action_for_base,
+    validate_decisions_dataframe,
 )
+from interface_adapter import build_compare_options, parse_sheet_keys_args, parse_sheet_keys_block
 
 
 def _create_wb(path: Path, sheets: dict[str, dict[str, object]]):
@@ -129,6 +136,20 @@ def test_compare_workbooks_row_based_avoids_cascade_and_detects_row_states(tmp_p
     assert {diff.key for diff in added} == {"ID=3"}
 
 
+def test_diffs_to_dataframe_exposes_stable_contract_columns(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "x"}})
+    _create_wb(b, {"Datos": {"A1": "y"}})
+
+    diff = compare_workbooks(a, b)
+    df = diffs_to_dataframe(diff.all_differences())
+
+    assert list(df.columns) == DECISION_COLUMNS
+    assert df.iloc[0]["diff_type"] == "modified"
+
+
 def test_apply_decisions_merges_changes(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
@@ -182,3 +203,66 @@ def test_export_and_read_decisions_template(tmp_path: Path):
     assert loaded.iloc[0]["action"] == "use_b"
     assert loaded.iloc[0]["sheet"] == "Datos"
     assert loaded.iloc[0]["diff_type"] == "modified"
+
+
+def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    out = tmp_path / "merged.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "base"}})
+    _create_wb(b, {"Datos": {"A1": "source"}})
+
+    diff = SERVICE.compare(ComparisonRequest(path_a=a, path_b=b))
+    decisions = diff.to_dataframe(default_action=source_action_for_base("a"))
+    result = SERVICE.apply_decisions(
+        MergeRequest(
+            workbook_a=a,
+            workbook_b=b,
+            decisions=decisions,
+            output_path=out,
+            base="a",
+        )
+    )
+
+    wb = load_workbook(result)
+    assert wb["Datos"]["A1"].value == "source"
+
+
+def test_validate_decisions_dataframe_rejects_invalid_actions():
+    invalid = diffs_to_dataframe([])
+    invalid.loc[0] = [None] * len(DECISION_COLUMNS)
+    invalid.loc[0, "sheet"] = "Datos"
+    invalid.loc[0, "row"] = 1
+    invalid.loc[0, "column"] = 1
+    invalid.loc[0, "action"] = "romper"
+
+    try:
+        validate_decisions_dataframe(invalid)
+    except ValueError as exc:
+        assert "Acciones no válidas" in str(exc)
+    else:
+        raise AssertionError("Se esperaba ValueError por acción inválida")
+
+
+def test_interface_adapter_parsers_and_option_builder():
+    assert parse_sheet_keys_block("Clientes:ID\nPedidos:Empresa,Numero") == {
+        "Clientes": ["ID"],
+        "Pedidos": ["Empresa", "Numero"],
+    }
+    assert parse_sheet_keys_args(["Clientes=ID", "Pedidos=Empresa,Numero"]) == {
+        "Clientes": ["ID"],
+        "Pedidos": ["Empresa", "Numero"],
+    }
+
+    options = build_compare_options(
+        compare_mode="row-based",
+        ignore_case=True,
+        keep_spaces=False,
+        empty_string_is_value=False,
+        header_row=2,
+        sheet_keys={"Clientes": ["ID"]},
+    )
+    assert options.compare_mode == "row-based"
+    assert options.case_sensitive is False
+    assert options.header_row == 2
