@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from comparator import (
@@ -11,7 +12,6 @@ from comparator import (
     apply_decisions,
     compare_workbooks,
     decisions_from_excel,
-    diffs_to_dataframe,
     export_decision_template,
 )
 
@@ -42,6 +42,27 @@ st.caption(
     "Compara dos libros completos y resuelve diferencias por celda o por registros. "
     "Incluye flujo Web (Streamlit) y flujo Excel nativo (plantilla editable)."
 )
+
+
+DISPLAY_COLUMNS = [
+    "context",
+    "value_a_display",
+    "value_b_display",
+    "preview",
+    "action",
+    "manual_value",
+    "reviewed",
+]
+EDITABLE_COLUMNS = ["action", "manual_value", "reviewed"]
+
+
+def _format_value(value: object) -> str:
+    if value is None:
+        return "∅"
+    if value == "":
+        return "''"
+    return str(value)
+
 
 with st.sidebar:
     st.header("Opciones de comparación")
@@ -99,84 +120,151 @@ path_b = temp_dir / file_b.name
 path_a.write_bytes(file_a.getbuffer())
 path_b.write_bytes(file_b.getbuffer())
 
-try:
-    diff = compare_workbooks(path_a, path_b, options=options)
-except ValueError as exc:
-    st.error(str(exc))
-    st.stop()
-
-total_diffs = sum(len(diff.differences[s]) for s in diff.common_sheets)
+diff = compare_workbooks(path_a, path_b, options=options)
+comparison_signature = (
+    file_a.name,
+    file_a.size,
+    file_b.name,
+    file_b.size,
+    options.strip_strings,
+    options.case_sensitive,
+    options.ignore_empty_string_vs_none,
+)
 
 st.subheader("Resumen")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Hojas en común", len(diff.common_sheets))
 m2.metric("Hojas solo en A", len(diff.only_in_a))
 m3.metric("Hojas solo en B", len(diff.only_in_b))
-m4.metric("Diferencias", total_diffs)
-st.caption(
-    "Modo activo: por coordenadas."
-    if compare_mode == "coordinate"
-    else "Modo activo: por filas/estructura usando encabezados y claves por hoja cuando se configuran."
-)
+m4.metric("Diferencias", diff.total_differences)
 
 if diff.only_in_a:
     st.warning(f"Hojas solo en A: {', '.join(diff.only_in_a)}")
 if diff.only_in_b:
     st.info(f"Hojas solo en B: {', '.join(diff.only_in_b)}")
 
+summary_df = pd.DataFrame(diff.summary_rows())
+if not summary_df.empty:
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
 web_tab, excel_tab = st.tabs(["🖥️ Resolver en web", "📗 Resolver en Excel"])
 
 with web_tab:
-    df = diffs_to_dataframe(diff.all_differences())
+    if st.session_state.get("comparison_signature") != comparison_signature:
+        decisions_df = diff.to_dataframe()
+        if not decisions_df.empty:
+            decisions_df["value_a_display"] = decisions_df["value_a"].map(_format_value)
+            decisions_df["value_b_display"] = decisions_df["value_b"].map(_format_value)
+            decisions_df["preview"] = decisions_df.apply(
+                lambda row: f"🅰️ {row['value_a_display']} ⟶ 🅱️ {row['value_b_display']}", axis=1
+            )
+        st.session_state["comparison_signature"] = comparison_signature
+        st.session_state["decisions_df"] = decisions_df
 
-    if df.empty:
+    master_df = st.session_state["decisions_df"]
+
+    if master_df.empty:
         st.success("No hay diferencias entre las hojas comunes.")
     else:
-        if compare_mode == "row-based":
-            st.warning(
-                "El modo por filas está pensado para auditoría de altas/bajas/modificaciones. "
-                "La generación automática del libro combinado sigue siendo segura solo en modo por coordenadas."
-            )
+        pending_count = int((~master_df["reviewed"]).sum())
+        manual_count = int((master_df["action"] == "manual").sum())
+        use_b_count = int((master_df["action"] == "use_b").sum())
 
-        st.write("Edita la acción por fila para generar el libro combinado.")
-        edited = st.data_editor(
-            df,
-            use_container_width=True,
-            num_rows="fixed",
-            column_config={
-                "action": st.column_config.SelectboxColumn(
-                    "action", options=["use_a", "use_b", "manual"], required=True
-                ),
-                "manual_value": st.column_config.TextColumn("manual_value"),
-                "row": st.column_config.NumberColumn(disabled=True),
-                "column": st.column_config.NumberColumn(disabled=True),
-                "sheet": st.column_config.TextColumn(disabled=True),
-                "cell": st.column_config.TextColumn(disabled=True),
-                "header": st.column_config.TextColumn(disabled=True),
-                "diff_type": st.column_config.TextColumn(disabled=True),
-                "key": st.column_config.TextColumn(disabled=True),
-                "value_a": st.column_config.TextColumn(disabled=True),
-                "value_b": st.column_config.TextColumn(disabled=True),
-            },
+        st.write(
+            "Edita las decisiones agrupadas por hoja. Puedes marcar una fila como revisada "
+            "sin cambiar todavía la acción final."
         )
+        info1, info2, info3 = st.columns(3)
+        info1.metric("Pendientes de revisión", pending_count)
+        info2.metric("Acción use_b", use_b_count)
+        info3.metric("Acción manual", manual_count)
+
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        available_sheets = sorted(master_df["sheet"].unique().tolist())
+        available_columns = sorted(master_df["column_letter"].unique().tolist())
+
+        with filter_col1:
+            selected_sheets = st.multiselect(
+                "Filtrar por hoja",
+                options=available_sheets,
+                default=available_sheets,
+            )
+        with filter_col2:
+            selected_columns = st.multiselect(
+                "Filtrar por columna",
+                options=available_columns,
+                default=available_columns,
+            )
+        with filter_col3:
+            action_filter = st.selectbox(
+                "Filtrar por acción",
+                options=["all", "use_a", "use_b", "manual"],
+                format_func=lambda value: {
+                    "all": "Todas",
+                    "use_a": "Solo use_a",
+                    "use_b": "Solo use_b",
+                    "manual": "Solo manual",
+                }[value],
+            )
+        with filter_col4:
+            only_pending = st.checkbox("Solo pendientes de revisión", value=False)
+
+        filtered_df = master_df[
+            master_df["sheet"].isin(selected_sheets) & master_df["column_letter"].isin(selected_columns)
+        ].copy()
+        if action_filter != "all":
+            filtered_df = filtered_df[filtered_df["action"] == action_filter]
+        if only_pending:
+            filtered_df = filtered_df[~filtered_df["reviewed"]]
+
+        if filtered_df.empty:
+            st.info("No hay diferencias que coincidan con los filtros seleccionados.")
+        else:
+            for sheet_name in selected_sheets:
+                sheet_rows = filtered_df[filtered_df["sheet"] == sheet_name]
+                if sheet_rows.empty:
+                    continue
+
+                group_summary = diff.grouped_differences[sheet_name]
+                pending_sheet = int((~sheet_rows["reviewed"]).sum())
+                expander_label = (
+                    f"{sheet_name} · {len(sheet_rows)} visibles / {group_summary.total_differences} totales"
+                    f" · columnas: {', '.join(group_summary.columns) or '—'}"
+                    f" · pendientes visibles: {pending_sheet}"
+                )
+                with st.expander(expander_label, expanded=True):
+                    edited_sheet = st.data_editor(
+                        sheet_rows[DISPLAY_COLUMNS],
+                        key=f"editor_{sheet_name}",
+                        use_container_width=True,
+                        num_rows="fixed",
+                        column_config={
+                            "context": st.column_config.TextColumn("Coordenada y contexto", disabled=True),
+                            "value_a_display": st.column_config.TextColumn("Valor en A", disabled=True),
+                            "value_b_display": st.column_config.TextColumn("Valor en B", disabled=True),
+                            "preview": st.column_config.TextColumn("Previsualización", disabled=True),
+                            "action": st.column_config.SelectboxColumn(
+                                "Acción", options=["use_a", "use_b", "manual"], required=True
+                            ),
+                            "manual_value": st.column_config.TextColumn("Valor manual"),
+                            "reviewed": st.column_config.CheckboxColumn("Revisada"),
+                        },
+                        hide_index=True,
+                    )
+                    master_df.loc[edited_sheet.index, EDITABLE_COLUMNS] = edited_sheet[EDITABLE_COLUMNS]
 
         include_extra = st.checkbox("Copiar hojas solo existentes en B", value=True)
         output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
 
-        if compare_mode == "coordinate":
-            if st.button("Generar Excel combinado (web)"):
-                output_path = temp_dir / output_name
-                result = apply_decisions(path_a, edited, output_path, path_b, include_sheets_only_in_b=include_extra)
-                st.success("Archivo combinado generado.")
-                st.download_button(
-                    label="Descargar resultado",
-                    data=result.read_bytes(),
-                    file_name=output_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-        else:
-            st.info(
-                "Para aplicar altas o bajas detectadas por filas, usa la plantilla como soporte de revisión y realiza la fusión final manualmente."
+        if st.button("Generar Excel combinado (web)"):
+            output_path = temp_dir / output_name
+            result = apply_decisions(path_a, master_df, output_path, path_b, include_sheets_only_in_b=include_extra)
+            st.success("Archivo combinado generado.")
+            st.download_button(
+                label="Descargar resultado",
+                data=result.read_bytes(),
+                file_name=output_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
 with excel_tab:

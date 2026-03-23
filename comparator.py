@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -16,6 +15,15 @@ VALID_ACTIONS = {"use_a", "use_b", "manual"}
 VALID_COMPARE_MODES = {"coordinate", "row-based"}
 
 
+def column_letter(column: int) -> str:
+    letters = ""
+    current = column
+    while current > 0:
+        current, rem = divmod(current - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 @dataclass
 class CellDiff:
     sheet: str
@@ -29,15 +37,21 @@ class CellDiff:
 
     @property
     def coordinate(self) -> str:
-        if self.column <= 0:
-            return f"ROW{self.row}"
+        return f"{column_letter(self.column)}{self.row}"
 
-        letters = ""
-        col = self.column
-        while col > 0:
-            col, rem = divmod(col - 1, 26)
-            letters = chr(65 + rem) + letters
-        return f"{letters}{self.row}"
+
+@dataclass
+class SheetDiffSummary:
+    sheet: str
+    differences: List[CellDiff]
+    total_differences: int = field(init=False)
+    columns: List[str] = field(init=False)
+    row_numbers: List[int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.total_differences = len(self.differences)
+        self.columns = sorted({column_letter(diff.column) for diff in self.differences})
+        self.row_numbers = sorted({diff.row for diff in self.differences})
 
 
 @dataclass
@@ -46,12 +60,38 @@ class WorkbookDiff:
     only_in_b: List[str]
     common_sheets: List[str]
     differences: Dict[str, List[CellDiff]]
+    grouped_differences: Dict[str, SheetDiffSummary] = field(init=False)
+    total_differences: int = field(init=False)
+    _all_differences: List[CellDiff] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.grouped_differences = {}
+        self._all_differences = []
+
+        for sheet in self.common_sheets:
+            sheet_diffs = list(self.differences.get(sheet, []))
+            self.differences[sheet] = sheet_diffs
+            self.grouped_differences[sheet] = SheetDiffSummary(sheet=sheet, differences=sheet_diffs)
+            self._all_differences.extend(sheet_diffs)
+
+        self.total_differences = len(self._all_differences)
 
     def all_differences(self) -> List[CellDiff]:
-        output: List[CellDiff] = []
-        for sheet in self.common_sheets:
-            output.extend(self.differences.get(sheet, []))
-        return output
+        return list(self._all_differences)
+
+    def summary_rows(self) -> List[dict[str, object]]:
+        return [
+            {
+                "sheet": summary.sheet,
+                "differences": summary.total_differences,
+                "columns": ", ".join(summary.columns),
+                "rows": len(summary.row_numbers),
+            }
+            for summary in self.grouped_differences.values()
+        ]
+
+    def to_dataframe(self, default_action: str = DEFAULT_ACTION) -> pd.DataFrame:
+        return diffs_to_dataframe(self._all_differences, default_action=default_action)
 
 
 @dataclass
@@ -291,7 +331,10 @@ def compare_workbooks(
     )
 
 
-def diffs_to_dataframe(diffs: Iterable[CellDiff]) -> pd.DataFrame:
+def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_ACTION) -> pd.DataFrame:
+    if default_action not in VALID_ACTIONS:
+        raise ValueError(f"default_action debe ser uno de {sorted(VALID_ACTIONS)}")
+
     rows = []
     for d in diffs:
         rows.append(
@@ -300,13 +343,13 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff]) -> pd.DataFrame:
                 "cell": d.coordinate,
                 "row": d.row,
                 "column": d.column,
-                "header": d.header,
-                "diff_type": d.diff_type,
-                "key": d.key,
+                "column_letter": column_letter(d.column),
+                "context": f"{d.sheet}!{d.coordinate} · fila {d.row} · columna {column_letter(d.column)} ({d.column})",
                 "value_a": d.value_a,
                 "value_b": d.value_b,
-                "action": DEFAULT_ACTION,
+                "action": default_action,
                 "manual_value": None,
+                "reviewed": False,
             }
         )
 
@@ -330,13 +373,13 @@ def export_decision_template(
         "cell",
         "row",
         "column",
-        "header",
-        "diff_type",
-        "key",
+        "column_letter",
+        "context",
         "value_a",
         "value_b",
         "action",
         "manual_value",
+        "reviewed",
     ]
     ws.append(headers)
 
@@ -345,27 +388,13 @@ def export_decision_template(
         cell.fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
         cell.font = Font(color="FFFFFF", bold=True)
 
-    for d in diff.all_differences():
-        ws.append(
-            [
-                d.sheet,
-                d.coordinate,
-                d.row,
-                d.column,
-                d.header,
-                d.diff_type,
-                d.key,
-                d.value_a,
-                d.value_b,
-                default_action,
-                None,
-            ]
-        )
+    for row in diff.to_dataframe(default_action=default_action).itertuples(index=False):
+        ws.append(list(row))
 
     dv = DataValidation(type="list", formula1='"use_a,use_b,manual"', allow_blank=False)
     ws.add_data_validation(dv)
     if ws.max_row >= 2:
-        dv.add(f"J2:J{ws.max_row}")
+        dv.add(f"I2:I{ws.max_row}")
 
     ws.freeze_panes = "A2"
 
@@ -374,11 +403,14 @@ def export_decision_template(
     summary.append(["Hojas en común", len(diff.common_sheets)])
     summary.append(["Hojas solo en A", len(diff.only_in_a)])
     summary.append(["Hojas solo en B", len(diff.only_in_b)])
-    summary.append(["Diferencias de celdas", len(diff.all_differences())])
+    summary.append(["Diferencias de celdas", diff.total_differences])
     if diff.only_in_a:
         summary.append(["Lista solo en A", ", ".join(diff.only_in_a)])
     if diff.only_in_b:
         summary.append(["Lista solo en B", ", ".join(diff.only_in_b)])
+
+    for row in diff.summary_rows():
+        summary.append([f"Diferencias en {row['sheet']}", row["differences"]])
 
     output_path = Path(output_path)
     wb.save(output_path)
@@ -399,13 +431,13 @@ def decisions_from_excel(path: str | Path, sheet_name: str = "Decisiones") -> pd
                 "cell",
                 "row",
                 "column",
-                "header",
-                "diff_type",
-                "key",
+                "column_letter",
+                "context",
                 "value_a",
                 "value_b",
                 "action",
                 "manual_value",
+                "reviewed",
             ]
         )
 
@@ -415,7 +447,15 @@ def decisions_from_excel(path: str | Path, sheet_name: str = "Decisiones") -> pd
     if "action" not in df.columns:
         raise ValueError("La hoja de decisiones debe contener la columna 'action'")
 
+    if "reviewed" not in df.columns:
+        df["reviewed"] = False
+
     df["action"] = df["action"].fillna(DEFAULT_ACTION).astype(str).str.strip()
+    df["reviewed"] = df["reviewed"].map(
+        lambda value: value
+        if isinstance(value, bool)
+        else str(value).strip().lower() in {"1", "true", "sí", "si", "yes", "x"}
+    ).fillna(False)
     invalid = sorted(set(df[~df["action"].isin(VALID_ACTIONS)]["action"].tolist()))
     if invalid:
         raise ValueError(f"Acciones no válidas: {invalid}. Válidas: {sorted(VALID_ACTIONS)}")
