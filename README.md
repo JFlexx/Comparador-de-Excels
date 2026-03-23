@@ -1,124 +1,201 @@
-# Comparador de Excels (arquitectura Excel-first)
+# Comparador de Excels
 
-Herramienta interna en Python para comparar dos libros Excel completos, revisar diferencias y generar un merge final usando `comparator.py` como **motor único**.
+Herramienta en Python orientada a **comparar, revisar y fusionar libros Excel** sin sacar al usuario de su flujo habitual de trabajo. El objetivo del producto es que la experiencia principal ocurra en Excel —o en una integración/add-in conectada a Excel— mientras el motor reutiliza el núcleo de comparación y merge ya existente.
 
-## Interfaz principal objetivo
+## Producto objetivo
 
-La interfaz principal pasa a ser **Excel Desktop** mediante un add-in con **`xlwings` + Ribbon + runtime local de Python**. El add-in no habla con `WorkbookDiff` ni con objetos internos del motor: consume contratos serializables del adaptador `excel_addin_adapter.py` y deja toda la lógica de negocio en `comparator.py`.
+La visión del proyecto es una solución **Excel-first**:
 
-### Ruta concreta de integración
+- comparar dos libros `.xlsx` o `.xlsm`,
+- revisar diferencias con decisiones explícitas,
+- aplicar un merge controlado,
+- guardar un libro final listo para continuar trabajando en Excel.
 
-**Opción elegida:** `xlwings` / Ribbon + Python local.
+La prioridad ya no es presentar el proyecto como una app web generalista, sino como un **motor de comparación de Excel con integración operativa en Excel**.
 
-Motivos:
-- permite trabajar directamente sobre libros abiertos en Excel Desktop,
-- evita exponer el motor como servicio adicional para un caso inicialmente local,
-- simplifica la carga y lectura de la tabla de decisiones en hojas reales,
-- reutiliza el mismo runtime Python que ya ejecuta el comparador y sus dependencias.
+## Estado del producto y transición
 
-Flujo previsto:
-1. El usuario pulsa acciones del Ribbon para seleccionar **libro base** y **libro origen**.
-2. El add-in construye un payload serializable y llama a `ExcelAddinAdapter.compare` o `compare_payload`.
-3. El adaptador usa `ComparatorService` para comparar y devuelve un resultado serializable con resumen + filas de decisión.
-4. El add-in llama a `load_decision_table_into_workbook` para materializar la tabla en una hoja de Excel.
-5. Tras la edición manual, el add-in llama a `read_decisions_from_workbook`.
-6. Finalmente invoca `execute_merge` para generar el libro combinado.
+### Qué se mantiene del motor actual
 
----
+Se conserva como base estable el motor Python ya implementado:
+
+- comparación multi-hoja entre dos libros,
+- detección de hojas exclusivas de A y de B,
+- reglas de normalización de valores (`case_sensitive`, espacios, `""` vs `None`),
+- modos de comparación `coordinate` y `row-based`,
+- exportación e importación de plantillas de decisiones,
+- merge final controlado por acciones `use_a`, `use_b` y `manual`.
+
+El punto de continuidad es `comparator.py`, que sigue siendo el contrato principal para cualquier interfaz futura.
+
+### Qué interfaz queda soportada
+
+La interfaz que se considera **objetivo y soportada** es la integración centrada en Excel:
+
+- flujo con plantilla de decisiones dentro de un libro Excel,
+- automatización o add-in que invoque el núcleo Python,
+- decisiones revisadas desde Excel antes de generar el merge final.
+
+En términos prácticos, hoy esto se materializa mediante el flujo de `excel_tool.py`, pensado como puente hacia una experiencia Excel-first más integrada.
+
+### Qué interfaz queda en desuso
+
+La interfaz web con Streamlit pasa a considerarse **legado / compatibilidad**:
+
+- sigue disponible para pruebas internas o soporte operativo,
+- no define la arquitectura objetivo del producto,
+- no debe tomarse como la experiencia principal a futuro.
+
+## Capacidades del motor actual
+
+- Compara todas las hojas comunes entre dos libros.
+- Detecta hojas exclusivas en A y en B.
+- Permite elegir la dirección del merge final (construir sobre A o sobre B).
+- Exporta una plantilla Excel editable con decisiones por diferencia.
+- Aplica decisiones manuales o automáticas para producir un archivo combinado.
+- Puede copiar hojas que solo existen en el libro origen elegido.
+
+## Modos de comparación
+
+### `coordinate`
+
+Úsalo cuando importa la **posición exacta de la celda**:
+
+- plantillas,
+- reportes,
+- hojas donde `B12` debe seguir siendo `B12`,
+- escenarios en los que el merge final debe aplicarse sobre coordenadas concretas.
+
+### `row-based`
+
+Úsalo cuando el contenido representa **registros tabulares**:
+
+- altas y bajas de filas,
+- inserciones intermedias,
+- comparación por encabezados,
+- identificación por columnas clave como `ID`, `Código`, `Email`, etc.
+
+Este modo ayuda a revisar cambios de estructura y registros sin el efecto cascada típico del diff por coordenadas.
+
+## Flujo real del usuario en Excel
+
+La experiencia objetivo del usuario dentro de Excel es la siguiente:
+
+### 1. Abrir la integración
+
+El usuario abre Excel y lanza la integración disponible para su entorno:
+
+- una plantilla conectada,
+- un script/launcher corporativo,
+- o un futuro add-in que invoque el motor Python.
+
+Desde ahí selecciona el **libro A** y el **libro B**, además del modo de comparación y, si aplica, claves por hoja.
+
+### 2. Comparar
+
+La integración ejecuta el núcleo de comparación y genera una vista o plantilla de decisiones:
+
+- detecta hojas comunes y exclusivas,
+- identifica diferencias,
+- prepara acciones por defecto (`use_a`, `use_b` o `manual`),
+- deja lista la revisión dentro del libro o del add-in.
+
+### 3. Revisar decisiones
+
+El usuario revisa cada diferencia desde Excel:
+
+- acepta el valor de A,
+- acepta el valor de B,
+- o escribe un valor manual.
+
+En el flujo actual, esto ocurre editando la hoja `Decisiones` de un archivo Excel generado por la herramienta.
+
+### 4. Aplicar merge
+
+Una vez revisadas las decisiones, la integración ejecuta el merge sobre el libro base elegido:
+
+- construir resultado sobre A para traer cambios desde B,
+- o construir resultado sobre B para traer cambios desde A.
+
+El merge reutiliza las decisiones registradas y genera un único libro resultante.
+
+### 5. Guardar resultado
+
+El usuario guarda el archivo combinado y continúa trabajando en Excel con ese libro como nuevo resultado consolidado.
 
 ## Arquitectura objetivo
 
-### Motor único
+La arquitectura objetivo se organiza en tres piezas.
 
-- `comparator.py`: núcleo estable del dominio. Expone `ComparatorService`, contratos de comparación, exportación/lectura de decisiones y merge final.
-- `excel_addin_adapter.py`: adaptador Excel-first orientado a Excel Desktop. Traduce operaciones de alto nivel del usuario a llamadas al motor.
-- `excel_integration_contracts.py`: contratos serializables para que el add-in trabaje con `dict`/JSON-friendly payloads sin conocer `WorkbookDiff`.
-- `app.py`: interfaz **legacy/demo** en Streamlit; ya no es la interfaz principal.
-- `excel_tool.py`: CLI auxiliar para automatización o soporte.
+### 1. Núcleo Python: `comparator.py`
 
-### Principio de diseño
+`comparator.py` es el **núcleo de negocio** y debe seguir concentrando:
 
-Las interfaces solo deben:
-1. capturar rutas, opciones y decisiones del usuario,
-2. convertirlas a contratos serializables,
-3. delegar en `ComparatorService` a través del adaptador,
-4. mostrar o persistir resultados.
+- contratos de comparación (`compare_workbooks` / `ComparatorService.compare`),
+- estructura estándar de diferencias,
+- exportación de plantilla de decisiones,
+- lectura de decisiones editadas,
+- aplicación del merge final.
 
-La lógica de diff, validación, normalización de decisiones y merge final debe seguir residiendo en `comparator.py`.
+La lógica de negocio debe vivir aquí para que no se replique en cada interfaz.
 
-- Estás comparando listados tabulares con encabezados (`ID`, `Código`, `Email`, etc.).
-- Puede haber **altas, bajas o inserciones intermedias** de filas.
-- Quieres evitar el efecto cascada típico de los diffs por coordenadas cuando una fila nueva desplaza todas las siguientes.
-- Puedes definir una o varias columnas clave por hoja, por ejemplo `Clientes:ID` o `Pedidos:Empresa,NúmeroPedido`.
-- También quieres **fusionar** esos cambios al libro final sin depender de la coordenada original de Excel.
+### 2. Adaptador Excel
 
-## Contratos serializables para Excel
+Sobre el núcleo se sitúa un **adaptador de integración con Excel**. Hoy ese papel lo cumplen la CLI `excel_tool.py` y la capa `interface_adapter.py`; a futuro puede ser un add-in, un launcher o una automatización corporativa.
 
-- Toma la fila de encabezados (por defecto la fila 1).
-- Empareja filas por las columnas clave configuradas para esa hoja.
-- Si una hoja no tiene clave configurada, usa el contenido completo de la fila como identidad implícita.
-- Reporta diferencias con tipo `added`, `deleted` o `modified`.
-- La plantilla de decisiones y el merge consumen `sheet`, `key`, `header` y `diff_type` para reubicar el registro al aplicar cambios.
+Su responsabilidad es:
 
-> **Nota:** para que el merge `row-based` sea estable y predecible, conviene definir `sheet_keys` por hoja. Si no se define clave, el motor puede caer en coordenadas/fila de apoyo cuando no pueda reconstruir una identidad lógica suficiente.
+- capturar archivos y parámetros,
+- traducirlos al contrato del núcleo,
+- lanzar la comparación,
+- transportar decisiones desde/hacia Excel,
+- ejecutar el merge final.
 
-`ExcelWorkbookSelection`
-- `base_workbook_path`
-- `source_workbook_path`
-- `base_side`
+### 3. Flujo de decisiones dentro del libro o add-in
 
-### Solicitud de comparación
+La capa visible para el usuario debe residir en Excel:
 
-`ExcelCompareContract`
-- `selection`
-- `compare_mode`
-- `header_row`
-- `sheet_keys`
-- banderas de normalización (`strip_strings`, `case_sensitive`, `ignore_empty_string_vs_none`)
+- hoja de decisiones dentro del libro,
+- panel lateral de add-in,
+- acciones guiadas para revisar y confirmar cambios.
 
-### Resultado de comparación
+La experiencia objetivo no es “subir dos Excels a una web”, sino **resolver diferencias desde el propio contexto de Excel**.
 
-`ExcelComparisonResult`
-- `route`
-- `selection`
-- `total_differences`
-- `common_sheets`
-- `only_in_base`
-- `only_in_source`
-- `default_action`
-- `summary_rows`
-- `decision_rows`
+## Interfaz soportada hoy: flujo Excel-first
 
-### Tabla de decisiones en hoja de Excel
+### Crear plantilla de decisiones
 
-`ExcelDecisionSheetContract`
-- `workbook_path`
-- `sheet_name`
-- `clear_sheet`
+#### Comparación por coordenadas
 
 ### Merge final
 
-`ExcelMergeContract`
-- `selection`
-- `decisions_workbook_path`
-- `decisions_sheet_name`
-- `output_path`
-- `include_sheets_from_source_only`
+#### Comparación por filas con claves por hoja
 
-Todos estos contratos tienen representación `dict`, por lo que un add-in puede serializarlos fácilmente.
+```bash
+python excel_tool.py compare \
+  --a libro_a.xlsx \
+  --b libro_b.xlsx \
+  --compare-mode row-based \
+  --sheet-key Clientes=ID \
+  --sheet-key Pedidos=Empresa,NumeroPedido \
+  --header-row 1 \
+  --template decisiones.xlsx
+```
 
-Esto genera `decisiones.xlsx` con:
-- Hoja `Decisiones`: una fila por diferencia.
-- Columnas auxiliares como `header`, `diff_type` y `key` para identificar el registro afectado.
-- Metadata del diff en la hoja `Resumen` (`compare_mode`, `header_row`, `sheet_keys`) para permitir merge posterior también en `row-based`.
-- Columna `action` con lista desplegable (`use_a`, `use_b`, `manual`).
-- Columna `manual_value` para casos manuales.
+Esto genera un Excel con:
 
-### 2) Editar decisiones en Excel
+- hoja `Decisiones`,
+- columnas como `header`, `diff_type` y `key`,
+- columna `action` con `use_a`, `use_b` y `manual`,
+- columna `manual_value` para intervención manual.
 
-## Operaciones de alto nivel del adaptador Excel
+### Revisar decisiones en Excel
 
-`ExcelAddinAdapter` expone el flujo pedido para Excel:
+```bash
+# abrir decisiones.xlsx manualmente en Excel y editar la hoja Decisiones
+```
+
+### Generar el libro combinado
 
 1. **Seleccionar libro base y libro origen**
    - `select_workbooks(...)`
@@ -141,121 +218,74 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-En la interfaz web (`streamlit run app.py`) ahora también puedes elegir visualmente la dirección del merge antes de generar el archivo final. Esto aplica tanto a `coordinate` como a `row-based`.
+## Streamlit como compatibilidad / legado
 
----
-
-## Uso recomendado: Excel Desktop
-
-### 1) Comparar desde el add-in
-
-El add-in construye un payload similar a este:
-
-```python
-payload = {
-    "selection": {
-        "base_workbook_path": "libro_base.xlsx",
-        "source_workbook_path": "libro_origen.xlsx",
-        "base_side": "a",
-    },
-    "compare_mode": "coordinate",
-    "header_row": 1,
-    "sheet_keys": {},
-}
-```
-
-Y llama al adaptador:
-
-- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`.
-- `interface_adapter.py`: adaptador compartido con parsing de opciones, DTOs de dirección de merge y acceso estable al servicio.
-- `streamlit_adapter.py`: adaptador específico de Streamlit; prepara tablas de revisión y wording visual sin contaminar el motor.
-- `cli_adapter.py`: adaptador específico de CLI; transforma argumentos/reportes sin mezclar reglas de negocio.
-- `excel_adapter.py`: adaptador específico para exportar/importar decisiones y ejecutar merges desde flujos Excel.
-- `app.py`: interfaz web en Streamlit; consume `streamlit_adapter.py` y `excel_adapter.py`.
-- `excel_tool.py`: CLI para flujo Excel-first; consume `cli_adapter.py`.
-- `tests/test_comparator.py`: pruebas unitarias del núcleo y de los contratos principales.
-
-adapter = ExcelAddinAdapter()
-comparison = adapter.compare_payload(payload)
-```
-
-### 2) Volcar la tabla de decisiones a una hoja
-
-```python
-adapter.load_decision_table_payload(
-    comparison,
-    {
-        "workbook_path": "host_decisiones.xlsx",
-        "sheet_name": "DecisionTable",
-        "clear_sheet": True,
-    },
-)
-```
-
-### 3) Leer decisiones editadas y ejecutar merge
-
-```python
-adapter.execute_merge_payload(
-    {
-        "selection": payload["selection"],
-        "decisions_workbook_path": "host_decisiones.xlsx",
-        "decisions_sheet_name": "DecisionTable",
-        "output_path": "resultado_combinado.xlsx",
-        "include_sheets_from_source_only": True,
-    }
-)
-```
-
----
-
-## Modos de comparación
-
-### Usa `coordinate` cuando...
-- importa la posición exacta de la celda,
-- quieres aplicar merge automático sobre coordenadas concretas,
-- estás comparando plantillas, reportes o formatos relativamente estables.
-
-### Usa `row-based` cuando...
-- comparas tablas con encabezados,
-- puede haber altas, bajas o inserciones intermedias,
-- quieres evitar cascadas por desplazamiento de filas,
-- puedes definir columnas clave por hoja como `Clientes:ID`.
-
-> Nota: `row-based` sigue siendo especialmente útil para revisión y auditoría. El merge automático final sigue siendo la ruta más directa en `coordinate`.
-
----
-
-## Interfaz secundaria: Streamlit (legacy/demo)
-
-La UI web se mantiene solo como interfaz opcional de apoyo:
+La interfaz web sigue disponible como herramienta secundaria para soporte interno o validación funcional.
 
 ```bash
 streamlit run app.py
 ```
 
-Úsala para demos internas, validación rápida o troubleshooting. La dirección principal del producto es Excel Desktop.
+Úsala solo cuando necesites:
 
-- **Entrada:** un `WorkbookDiff`, una ruta de salida y una acción por defecto válida.
-- **Salida:** archivo Excel con hoja `Decisiones` y hoja `Resumen`.
-- **Contrato de decisiones:** la hoja `Decisiones` usa columnas estables como `sheet`, `row`, `column`, `header`, `key`, `diff_type`, `action`, `manual_value` y `reviewed`.
-- **Metadata complementaria:** la hoja `Resumen` persiste `compare_mode`, `header_row` y `sheet_keys` para que el merge pueda reconstruir el contexto lógico del diff.
+- revisar diferencias desde navegador en lugar de Excel,
+- depurar el comportamiento del motor,
+- validar rápidamente opciones de comparación.
 
-## CLI auxiliar (opcional)
+No representa la dirección objetivo del producto.
 
-- **Entrada:** ruta a una plantilla editada.
-- **Salida:** `pandas.DataFrame` normalizado, con columnas estándar del motor.
-- **Acciones válidas:** `use_a`, `use_b`, `manual`.
-- **Metadata preservada:** cuando existe hoja `Resumen`, el DataFrame resultante conserva `compare_mode`, `header_row` y `sheet_keys` en `DataFrame.attrs`.
+## Limitaciones actuales
 
-#### `apply_decisions(workbook_a, decisions, output_path, workbook_b, base, compare_mode, header_row, sheet_keys)`
+### 1. Estilos y formato no se comparan
 
-- **Entrada:** dos rutas de libros, un DataFrame de decisiones y la base de merge (`a` o `b`).
-- **Salida:** libro combinado en `output_path`.
-- **Semántica de acciones:**
-  - `use_a`: conserva el valor de A.
-  - `use_b`: conserva el valor de B.
-  - `manual`: escribe `manual_value`.
-- **Contrato `row-based`:** cuando `compare_mode="row-based"`, el merge resuelve decisiones por identidad lógica de registro usando `sheet`, `key`, `header` y `diff_type`, y se apoya en `header_row` / `sheet_keys` para localizar filas aunque hayan cambiado de posición.
+La herramienta compara **valores** y decisiones de merge, pero no resuelve de forma completa:
+
+- estilos,
+- formatos,
+- comentarios,
+- validaciones avanzadas,
+- otros metadatos visuales del libro.
+
+### 2. Diferencias entre `coordinate` y `row-based`
+
+Los dos modos no significan lo mismo ni ofrecen la misma capacidad operativa:
+
+| Aspecto | `coordinate` | `row-based` |
+|---|---|---|
+| Unidad comparada | Celda por posición | Registro por fila |
+| Supuesto principal | Importa la coordenada exacta | Importa la identidad lógica del registro |
+| Requiere encabezados | No | Sí, o al menos una estructura tabular interpretable |
+| Claves por hoja | No | Recomendadas para emparejar registros |
+| Altas/bajas de filas | Tienden a generar cascadas de diferencias | Se modelan mejor como added/deleted/modified |
+| Merge final automático | Es el flujo recomendado | Actualmente queda orientado sobre todo a revisión/auditoría |
+
+### 3. Dependencia de entorno local si la integración usa Python
+
+Mientras la integración dependa de ejecutar Python localmente, el entorno del usuario o del equipo necesita:
+
+- Python instalado,
+- dependencias del proyecto disponibles,
+- acceso a los archivos Excel desde ese entorno,
+- mecanismos corporativos para distribuir/actualizar el runtime si se quiere una experiencia masiva.
+
+Esto es relevante para cualquier integración en Excel basada en scripts, launcher local o add-in que delegue en un backend Python local.
+
+## Tabla de migración para usuarios actuales
+
+| Si hoy usas... | Estado | Qué cambia | Qué debes hacer ahora |
+|---|---|---|---|
+| `app.py` | Legado / compatibilidad | La web deja de ser la experiencia principal; pasa a ser un visor/editor auxiliar | Mantenerlo solo para soporte, pruebas o validación interna |
+| `excel_tool.py compare` | Soportado | Se consolida como puente hacia la integración Excel-first | Seguir generando la plantilla de decisiones desde aquí |
+| `excel_tool.py merge` | Soportado | Sigue siendo el mecanismo operativo para materializar el merge final | Seguir usándolo tras revisar decisiones en Excel |
+| Integración futura con add-in | Objetivo | Debe reutilizar `comparator.py` y el adaptador, no duplicar lógica de negocio | Diseñar la UX dentro de Excel y conectar con el núcleo existente |
+
+## Instalación
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## Ejecutar pruebas
 
@@ -263,11 +293,16 @@ streamlit run app.py
 pytest -q
 ```
 
----
+## Componentes principales
 
-## Notas
+- `comparator.py`: núcleo estable del motor y contrato principal de comparación/merge.
+- `interface_adapter.py`: capa adaptadora entre el núcleo y las interfaces.
+- `excel_tool.py`: interfaz operativa actual para el flujo Excel-first.
+- `app.py`: interfaz Streamlit en modo legado/compatibilidad.
+- `tests/test_comparator.py`: pruebas unitarias del núcleo.
+
+## Notas finales
 
 - Soporta `.xlsx` y `.xlsm`.
-- Compara valores de celda (no formato, estilos, comentarios, validaciones avanzadas).
-- En modo `row-based`, usa encabezados para comparar estructura y detectar registros agregados/eliminados/modificados, y puede aplicar merge sobre esos registros desde la web o desde la plantilla Excel.
-- Si quieres auditoría, puedes añadir columnas como usuario/fecha/comentario en la plantilla y extender `apply_decisions`.
+- El núcleo está preparado para ser reutilizado por un add-in, automatización o integración corporativa.
+- La dirección del producto es **Excel como experiencia principal** y **Python como motor reutilizable**.
