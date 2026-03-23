@@ -28,6 +28,7 @@ DECISION_COLUMNS = [
     "decision_id",
     "sheet",
     "cell",
+    "decision_id",
     "row",
     "column",
     "column_letter",
@@ -568,6 +569,7 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
                 "decision_id": build_decision_id(diff),
                 "sheet": diff.sheet,
                 "cell": diff.coordinate,
+                "decision_id": _build_decision_id(diff),
                 "row": diff.row,
                 "column": diff.column,
                 "column_letter": column_letter(diff.column),
@@ -586,53 +588,13 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
     return pd.DataFrame(rows, columns=DECISION_COLUMNS)
 
 
-def _write_metadata_sheet(wb: Workbook, diff: WorkbookDiff, default_action: str) -> None:
-    metadata = wb.create_sheet(DECISION_METADATA_SHEET_NAME)
-    metadata.sheet_state = "hidden"
-    metadata.append(["key", "value"])
-    metadata_rows = [
-        ("format_version", DECISION_FORMAT_VERSION),
-        ("compare_mode", diff.options.compare_mode),
-        ("base_workbook", _target_base_for_default_action(default_action)),
-        ("generated_at", datetime.now(timezone.utc).isoformat()),
-        ("source_signature", _source_signature(diff)),
-        ("workbook_a", Path(diff.workbook_a).name if diff.workbook_a else None),
-        ("workbook_b", Path(diff.workbook_b).name if diff.workbook_b else None),
-    ]
-    for key, value in metadata_rows:
-        metadata.append([key, value])
-
-
-
-def _add_decision_table(ws: Worksheet) -> None:
-    if ws.max_row < 2:
-        return
-
-    last_column = column_letter(ws.max_column)
-    table = Table(displayName="DecisionTable", ref=f"A1:{last_column}{ws.max_row}")
-    table.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False,
-    )
-    ws.add_table(table)
-
-
-
-def _protect_decision_sheet(ws: Worksheet) -> None:
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
-            header = str(ws.cell(row=1, column=cell.column).value)
-            cell.protection = Protection(locked=header not in EDITABLE_DECISION_COLUMNS)
-
-    ws.protection.sheet = True
-    ws.protection.autoFilter = True
-    ws.protection.sort = True
-    ws.protection.selectLockedCells = True
-    ws.protection.selectUnlockedCells = True
-
+def _build_decision_id(diff: CellDiff) -> str:
+    parts = [diff.sheet, diff.coordinate, diff.diff_type]
+    if diff.key:
+        parts.append(str(diff.key))
+    if diff.header:
+        parts.append(str(diff.header))
+    return "|".join(parts)
 
 
 def _style_decision_sheet(ws: Worksheet) -> None:
@@ -645,10 +607,16 @@ def _style_decision_sheet(ws: Worksheet) -> None:
     if ws.max_row >= 2:
         action_column = DECISION_COLUMNS.index("action") + 1
         dv.add(f"{column_letter(action_column)}2:{column_letter(action_column)}{ws.max_row}")
+        editable_columns = {
+            DECISION_COLUMNS.index("action") + 1,
+            DECISION_COLUMNS.index("manual_value") + 1,
+            DECISION_COLUMNS.index("reviewed") + 1,
+        }
+        for row in range(2, ws.max_row + 1):
+            for column in editable_columns:
+                ws.cell(row=row, column=column).protection = Protection(locked=False)
     ws.freeze_panes = "A2"
-    _add_decision_table(ws)
-    _protect_decision_sheet(ws)
-
+    ws.protection.sheet = True
 
 
 def export_decision_template(
@@ -738,25 +706,12 @@ def decisions_from_excel(path: str | Path, sheet_name: str = DECISION_SHEET_NAME
     df = pd.DataFrame(data, columns=headers)
     return validate_decisions_dataframe(df)
 
+    missing = [column for column in _required_decision_columns() if column not in df.columns]
+    if missing:
+        raise ValueError(f"La hoja de decisiones no contiene columnas requeridas: {missing}")
 
-
-def _read_summary_metadata(ws: Worksheet) -> tuple[CompareMode, int, dict[str, list[str]]]:
-    compare_mode: CompareMode = "coordinate"
-    header_row = 1
-    sheet_keys: dict[str, list[str]] = {}
-
-    for metric, value in ws.iter_rows(min_row=2, max_col=2, values_only=True):
-        if metric == "Modo de comparación" and value in VALID_COMPARE_MODES:
-            compare_mode = str(value)
-        elif metric == "Fila de encabezados" and value is not None:
-            header_row = int(value)
-        elif isinstance(metric, str) and metric.startswith(SUMMARY_KEYS_PREFIX) and value:
-            sheet_name = metric.removeprefix(SUMMARY_KEYS_PREFIX).strip()
-            columns = [column.strip() for column in str(value).split(",") if column.strip()]
-            if sheet_name and columns:
-                sheet_keys[sheet_name] = columns
-
-    return compare_mode, header_row, sheet_keys
+    df = df[DECISION_COLUMNS].copy()
+    return validate_decisions_dataframe(df)
 
 
 def _resolve_direction(base: WorkbookSide) -> tuple[WorkbookSide, WorkbookSide]:
@@ -777,12 +732,18 @@ def source_action_for_base(base: WorkbookSide) -> str:
 def validate_decisions_dataframe(decisions: pd.DataFrame) -> pd.DataFrame:
     """Valida y normaliza el DataFrame de decisiones esperado por el motor."""
 
-    missing = [column for column in DECISION_COLUMNS if column not in decisions.columns]
+    missing = [column for column in _required_decision_columns() if column not in decisions.columns]
     if missing:
         raise ValueError(f"El DataFrame de decisiones no contiene columnas requeridas: {missing}")
 
-    normalized = decisions[DECISION_COLUMNS].copy()
-    normalized["decision_id"] = normalized["decision_id"].fillna("").astype(str).str.strip()
+    normalized = decisions.copy()
+    for column in DECISION_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+
+    normalized = normalized[DECISION_COLUMNS].copy()
+    normalized["decision_id"] = normalized["decision_id"].map(_normalize_text_cell)
+    normalized["sheet"] = normalized["sheet"].map(_normalize_text_cell)
     normalized["action"] = normalized["action"].fillna(DEFAULT_ACTION).astype(str).str.strip()
     normalized["reviewed"] = normalized["reviewed"].map(_coerce_reviewed).fillna(False)
 
@@ -876,13 +837,42 @@ def validate_decisions_dataframe(decisions: pd.DataFrame) -> pd.DataFrame:
     if invalid_types:
         raise ValueError(f"Tipos inválidos en decisiones: {invalid_types}")
 
-    if orphan_rows:
-        raise ValueError(f"Filas huérfanas o inconsistentes en decisiones: {orphan_rows}")
+    if normalized["decision_id"].isna().any():
+        raise ValueError("Todas las decisiones deben incluir un 'decision_id' no vacío")
 
-    normalized["row"] = normalized["row"].astype(int)
-    normalized["column"] = normalized["column"].astype(int)
+    duplicated = normalized.loc[normalized["decision_id"].duplicated(keep=False), "decision_id"].tolist()
+    if duplicated:
+        raise ValueError(f"Hay decision_id duplicados: {sorted(set(duplicated))}")
+
+    if normalized["sheet"].isna().any():
+        raise ValueError("Todas las decisiones deben incluir una hoja válida")
+
+    normalized["row"] = _normalize_index_series(normalized["row"], "row")
+    normalized["column"] = _normalize_index_series(normalized["column"], "column")
+
     return normalized
 
+
+def _required_decision_columns() -> tuple[str, ...]:
+    return ("sheet", "decision_id", "row", "column", "action")
+
+
+def _normalize_text_cell(value: object) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _normalize_index_series(series: pd.Series, column_name: str) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.isna().any():
+        raise ValueError(f"La columna '{column_name}' debe contener enteros válidos")
+    if (numeric <= 0).any():
+        raise ValueError(f"La columna '{column_name}' debe ser > 0")
+    if (numeric % 1 != 0).any():
+        raise ValueError(f"La columna '{column_name}' debe contener enteros válidos")
+    return numeric.astype(int)
 
 
 def apply_decisions(
@@ -924,14 +914,6 @@ def apply_decisions(
     wb_b = load_workbook(workbook_b)
     workbooks = {"a": wb_a, "b": wb_b}
     wb_source = workbooks[source_key]
-
-            if action == f"use_{source_key}":
-                if sheet_name in wb_source.sheetnames:
-                    ws_out.cell(row=row_index, column=column_index).value = wb_source[sheet_name].cell(
-                        row=row_index,
-                        column=column_index,
-                    ).value
-                continue
 
             ws_out.cell(row=row_index, column=column_index).value = row.get("manual_value")
 
