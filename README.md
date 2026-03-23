@@ -46,13 +46,21 @@ Las interfaces solo deben:
 
 La lógica de diff, validación, normalización de decisiones y merge final debe seguir residiendo en `comparator.py`.
 
----
+- Estás comparando listados tabulares con encabezados (`ID`, `Código`, `Email`, etc.).
+- Puede haber **altas, bajas o inserciones intermedias** de filas.
+- Quieres evitar el efecto cascada típico de los diffs por coordenadas cuando una fila nueva desplaza todas las siguientes.
+- Puedes definir una o varias columnas clave por hoja, por ejemplo `Clientes:ID` o `Pedidos:Empresa,NúmeroPedido`.
+- También quieres **fusionar** esos cambios al libro final sin depender de la coordenada original de Excel.
 
 ## Contratos serializables para Excel
 
-El add-in debe trabajar con contratos estables en vez de consumir `WorkbookDiff`.
+- Toma la fila de encabezados (por defecto la fila 1).
+- Empareja filas por las columnas clave configuradas para esa hoja.
+- Si una hoja no tiene clave configurada, usa el contenido completo de la fila como identidad implícita.
+- Reporta diferencias con tipo `added`, `deleted` o `modified`.
+- La plantilla de decisiones y el merge consumen `sheet`, `key`, `header` y `diff_type` para reubicar el registro al aplicar cambios.
 
-### Selección de libros
+> **Nota:** para que el merge `row-based` sea estable y predecible, conviene definir `sheet_keys` por hoja. Si no se define clave, el motor puede caer en coordenadas/fila de apoyo cuando no pueda reconstruir una identidad lógica suficiente.
 
 `ExcelWorkbookSelection`
 - `base_workbook_path`
@@ -99,7 +107,14 @@ El add-in debe trabajar con contratos estables en vez de consumir `WorkbookDiff`
 
 Todos estos contratos tienen representación `dict`, por lo que un add-in puede serializarlos fácilmente.
 
----
+Esto genera `decisiones.xlsx` con:
+- Hoja `Decisiones`: una fila por diferencia.
+- Columnas auxiliares como `header`, `diff_type` y `key` para identificar el registro afectado.
+- Metadata del diff en la hoja `Resumen` (`compare_mode`, `header_row`, `sheet_keys`) para permitir merge posterior también en `row-based`.
+- Columna `action` con lista desplegable (`use_a`, `use_b`, `manual`).
+- Columna `manual_value` para casos manuales.
+
+### 2) Editar decisiones en Excel
 
 ## Operaciones de alto nivel del adaptador Excel
 
@@ -126,6 +141,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+En la interfaz web (`streamlit run app.py`) ahora también puedes elegir visualmente la dirección del merge antes de generar el archivo final. Esto aplica tanto a `coordinate` como a `row-based`.
+
 ---
 
 ## Uso recomendado: Excel Desktop
@@ -149,8 +166,11 @@ payload = {
 
 Y llama al adaptador:
 
-```python
-from excel_addin_adapter import ExcelAddinAdapter
+- `comparator.py`: núcleo estable del motor. Expone la API de servicio (`ComparatorService`) y las funciones públicas `compare_workbooks`, `export_decision_template`, `decisions_from_excel` y `apply_decisions`. También documenta los contratos de entrada/salida para rutas, DataFrames de decisiones, acciones válidas y modos `coordinate` / `row-based`, incluyendo merge lógico por registro.
+- `interface_adapter.py`: capa adaptadora para interfaces. Centraliza parsing de opciones, etiquetas de dirección de merge, DataFrames de revisión y llamadas al servicio.
+- `app.py`: interfaz web en Streamlit; solo orquesta UI y delega en la capa adaptadora.
+- `excel_tool.py`: CLI para flujo Excel-first; solo interpreta argumentos y delega en la capa adaptadora.
+- `tests/test_comparator.py`: pruebas unitarias del núcleo y de los contratos principales.
 
 adapter = ExcelAddinAdapter()
 comparison = adapter.compare_payload(payload)
@@ -212,18 +232,27 @@ streamlit run app.py
 
 Úsala para demos internas, validación rápida o troubleshooting. La dirección principal del producto es Excel Desktop.
 
----
+- **Entrada:** un `WorkbookDiff`, una ruta de salida y una acción por defecto válida.
+- **Salida:** archivo Excel con hoja `Decisiones` y hoja `Resumen`.
+- **Contrato de decisiones:** la hoja `Decisiones` usa columnas estables como `sheet`, `row`, `column`, `header`, `key`, `diff_type`, `action`, `manual_value` y `reviewed`.
+- **Metadata complementaria:** la hoja `Resumen` persiste `compare_mode`, `header_row` y `sheet_keys` para que el merge pueda reconstruir el contexto lógico del diff.
 
 ## CLI auxiliar (opcional)
 
-Sigue existiendo un flujo por línea de comandos para soporte y automatización:
+- **Entrada:** ruta a una plantilla editada.
+- **Salida:** `pandas.DataFrame` normalizado, con columnas estándar del motor.
+- **Acciones válidas:** `use_a`, `use_b`, `manual`.
+- **Metadata preservada:** cuando existe hoja `Resumen`, el DataFrame resultante conserva `compare_mode`, `header_row` y `sheet_keys` en `DataFrame.attrs`.
 
-```bash
-python excel_tool.py compare --a libro_a.xlsx --b libro_b.xlsx --base a --template decisiones.xlsx
-python excel_tool.py merge --a libro_a.xlsx --b libro_b.xlsx --decisions decisiones.xlsx --apply-onto a --output resultado.xlsx
-```
+#### `apply_decisions(workbook_a, decisions, output_path, workbook_b, base, compare_mode, header_row, sheet_keys)`
 
----
+- **Entrada:** dos rutas de libros, un DataFrame de decisiones y la base de merge (`a` o `b`).
+- **Salida:** libro combinado en `output_path`.
+- **Semántica de acciones:**
+  - `use_a`: conserva el valor de A.
+  - `use_b`: conserva el valor de B.
+  - `manual`: escribe `manual_value`.
+- **Contrato `row-based`:** cuando `compare_mode="row-based"`, el merge resuelve decisiones por identidad lógica de registro usando `sheet`, `key`, `header` y `diff_type`, y se apoya en `header_row` / `sheet_keys` para localizar filas aunque hayan cambiado de posición.
 
 ## Ejecutar pruebas
 
@@ -236,6 +265,6 @@ pytest -q
 ## Notas
 
 - Soporta `.xlsx` y `.xlsm`.
-- Compara valores de celda; no busca preservar estilos complejos, comentarios ni reglas avanzadas de Excel.
-- La hoja de decisiones usa un contrato estable con columnas como `sheet`, `row`, `column`, `action`, `manual_value` y `reviewed`.
-- Si en el futuro se necesitara telemetría, auditoría o integración corporativa adicional, debería añadirse en nuevos adaptadores o capas de orquestación, no en el motor base.
+- Compara valores de celda (no formato, estilos, comentarios, validaciones avanzadas).
+- En modo `row-based`, usa encabezados para comparar estructura y detectar registros agregados/eliminados/modificados, y puede aplicar merge sobre esos registros desde la web o desde la plantilla Excel.
+- Si quieres auditoría, puedes añadir columnas como usuario/fecha/comentario en la plantilla y extender `apply_decisions`.

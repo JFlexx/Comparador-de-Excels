@@ -189,6 +189,134 @@ def test_apply_decisions_merges_changes_from_a_onto_b(tmp_path: Path):
     assert wb["NuevaA"]["A1"].value == 42
 
 
+def test_apply_decisions_row_based_merges_modified_record_by_key(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(
+        a,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "C1": "Estado",
+                "A2": 1,
+                "B2": "Ana",
+                "C2": "Base",
+            }
+        },
+    )
+    _create_wb(
+        b,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "C1": "Estado",
+                "A2": 1,
+                "B2": "Ana",
+                "C2": "Actualizado",
+            }
+        },
+    )
+
+    diff = compare_workbooks(a, b, options=CompareOptions(compare_mode="row-based", sheet_keys={"Datos": ["ID"]}))
+    decisions = diff.to_dataframe(default_action="use_b")
+
+    output = tmp_path / "row_modified.xlsx"
+    apply_decisions(
+        a,
+        decisions,
+        output,
+        b,
+        base="a",
+        compare_mode="row-based",
+        header_row=1,
+        sheet_keys={"Datos": ["ID"]},
+    )
+
+    wb = load_workbook(output)
+    assert wb["Datos"]["C2"].value == "Actualizado"
+
+
+def test_apply_decisions_row_based_merges_added_record_by_key(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(
+        a,
+        {"Datos": {"A1": "ID", "B1": "Nombre", "A2": 1, "B2": "Ana"}},
+    )
+    _create_wb(
+        b,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "A2": 1,
+                "B2": "Ana",
+                "A3": 2,
+                "B3": "Luis",
+            }
+        },
+    )
+
+    diff = compare_workbooks(a, b, options=CompareOptions(compare_mode="row-based", sheet_keys={"Datos": ["ID"]}))
+    decisions = diff.to_dataframe(default_action="use_b")
+
+    output = tmp_path / "row_added.xlsx"
+    apply_decisions(
+        a,
+        decisions,
+        output,
+        b,
+        base="a",
+        compare_mode="row-based",
+        header_row=1,
+        sheet_keys={"Datos": ["ID"]},
+    )
+
+    wb = load_workbook(output)
+    assert wb["Datos"]["A3"].value == 2
+    assert wb["Datos"]["B3"].value == "Luis"
+
+
+def test_apply_decisions_row_based_merges_deleted_record_by_key_from_template(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(
+        a,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "A2": 1,
+                "B2": "Ana",
+                "A3": 2,
+                "B3": "Luis",
+            }
+        },
+    )
+    _create_wb(
+        b,
+        {"Datos": {"A1": "ID", "B1": "Nombre", "A2": 1, "B2": "Ana"}},
+    )
+
+    diff = compare_workbooks(a, b, options=CompareOptions(compare_mode="row-based", sheet_keys={"Datos": ["ID"]}))
+    template = tmp_path / "row_based_template.xlsx"
+    export_decision_template(diff, template, default_action="use_b")
+    decisions = decisions_from_excel(template)
+
+    output = tmp_path / "row_deleted.xlsx"
+    apply_decisions(a, decisions, output, b, base="a")
+
+    wb = load_workbook(output)
+    assert wb["Datos"].max_row == 2
+    assert wb["Datos"]["A2"].value == 1
+    assert wb["Datos"]["B2"].value == "Ana"
+
+
 def test_export_and_read_decisions_template(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
@@ -205,6 +333,23 @@ def test_export_and_read_decisions_template(tmp_path: Path):
     assert loaded.iloc[0]["action"] == "use_b"
     assert loaded.iloc[0]["sheet"] == "Datos"
     assert loaded.iloc[0]["diff_type"] == "modified"
+
+
+def test_decisions_from_excel_preserves_row_based_metadata(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "ID", "B1": "Nombre", "A2": 1, "B2": "Ana"}})
+    _create_wb(b, {"Datos": {"A1": "ID", "B1": "Nombre", "A2": 2, "B2": "Luis"}})
+
+    diff = compare_workbooks(a, b, options=CompareOptions(compare_mode="row-based", sheet_keys={"Datos": ["ID"]}))
+    template = tmp_path / "metadata.xlsx"
+    export_decision_template(diff, template)
+
+    loaded = decisions_from_excel(template)
+    assert loaded.attrs["compare_mode"] == "row-based"
+    assert loaded.attrs["header_row"] == 1
+    assert loaded.attrs["sheet_keys"] == {"Datos": ["ID"]}
 
 
 def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):

@@ -247,30 +247,30 @@ with web_tab:
 
         if compare_mode == "row-based":
             st.info(
-                "El modo row-based está orientado a revisión/auditoría. "
-                "La fusión automática final queda reservada al modo coordinate."
+                "El modo row-based ahora permite merge por registro: "
+                "el motor usa key/header/diff_type para ubicar cada decisión aunque las filas se hayan movido."
             )
-        else:
-            include_extra = st.checkbox(f"Copiar hojas solo existentes en {labels.source}", value=True)
-            output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
 
-            if st.button("Generar Excel combinado (web)"):
-                output_path = temp_dir / output_name
-                result = merge_workbooks(
-                    workbook_a=path_a,
-                    workbook_b=path_b,
-                    decisions=master_df,
-                    output_path=output_path,
-                    base=merge_direction,
-                    include_sheets_from_source_only=include_extra,
-                )
-                st.success("Archivo combinado generado.")
-                st.download_button(
-                    label="Descargar resultado",
-                    data=result.read_bytes(),
-                    file_name=output_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+        include_extra = st.checkbox(f"Copiar hojas solo existentes en {labels.source}", value=True)
+        output_name = st.text_input("Nombre de salida", "resultado_combinado.xlsx")
+
+        if st.button("Generar Excel combinado (web)"):
+            output_path = temp_dir / output_name
+            result = merge_workbooks(
+                workbook_a=path_a,
+                workbook_b=path_b,
+                decisions=master_df,
+                output_path=output_path,
+                base=merge_direction,
+                include_sheets_from_source_only=include_extra,
+            )
+            st.success("Archivo combinado generado.")
+            st.download_button(
+                label="Descargar resultado",
+                data=result.read_bytes(),
+                file_name=output_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 with excel_tab:
     st.write(
@@ -278,6 +278,10 @@ with excel_tab:
         f"1) comparar, 2) descargar plantilla con acción por defecto para traer cambios de {labels.source} hacia {labels.base}, "
         "3) editar decisiones, 4) subir plantilla y solicitar el merge final."
     )
+    if compare_mode == "row-based":
+        st.caption(
+            "En row-based, la plantilla conserva metadata del diff para que el merge use la identidad lógica del registro."
+        )
 
     template_name = st.text_input("Nombre plantilla", "decisiones.xlsx")
     template_path = temp_dir / template_name
