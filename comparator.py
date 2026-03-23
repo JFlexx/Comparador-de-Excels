@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Mapping, Optional, Sequence
+from urllib.parse import quote, unquote
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Protection
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
 WorkbookSide = Literal["a", "b"]
@@ -18,7 +22,10 @@ DEFAULT_ACTION = "use_b"
 VALID_ACTIONS = {"use_a", "use_b", "manual"}
 VALID_COMPARE_MODES = {"coordinate", "row-based"}
 DECISION_SHEET_NAME = "Decisiones"
+DECISION_METADATA_SHEET_NAME = "_metadata"
+DECISION_FORMAT_VERSION = "2.0"
 DECISION_COLUMNS = [
+    "decision_id",
     "sheet",
     "cell",
     "row",
@@ -34,6 +41,7 @@ DECISION_COLUMNS = [
     "manual_value",
     "reviewed",
 ]
+EDITABLE_DECISION_COLUMNS = {"action", "manual_value", "reviewed"}
 
 
 @dataclass(frozen=True)
@@ -76,7 +84,7 @@ class MergeRequest:
     workbook_a/workbook_b:
         Rutas a los dos libros originales.
     decisions:
-        DataFrame con columnas al menos `sheet`, `row`, `column`, `action`.
+        DataFrame con columnas al menos `decision_id`, `sheet`, `row`, `column`, `action`.
         Para `manual`, también se usa `manual_value`.
     base:
         `"a"` o `"b"`; indica sobre qué libro se construye el resultado final.
@@ -198,6 +206,8 @@ class WorkbookDiff:
     common_sheets: List[str]
     differences: Dict[str, List[CellDiff]]
     options: CompareOptions
+    workbook_a: Optional[str] = None
+    workbook_b: Optional[str] = None
     grouped_differences: Dict[str, SheetDiffSummary] = field(init=False)
     total_differences: int = field(init=False)
     _all_differences: List[CellDiff] = field(init=False, repr=False)
@@ -401,6 +411,58 @@ def _compare_sheet_by_rows(sheet_name: str, ws_a: Worksheet, ws_b: Worksheet, op
     return diffs
 
 
+def build_decision_id(diff: CellDiff) -> str:
+    payload = "|".join(
+        [
+            diff.sheet,
+            str(diff.row),
+            str(diff.column),
+            diff.diff_type,
+            "" if diff.header is None else str(diff.header),
+            "" if diff.key is None else str(diff.key),
+            "" if diff.value_a is None else repr(diff.value_a),
+            "" if diff.value_b is None else repr(diff.value_b),
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{quote(diff.sheet, safe='')}|{diff.row}|{diff.column}|{digest}"
+
+
+def _parse_decision_id(decision_id: object) -> tuple[str, int, int]:
+    value = "" if decision_id is None else str(decision_id).strip()
+    parts = value.split("|")
+    if len(parts) != 4:
+        raise ValueError("decision_id no tiene el formato esperado")
+
+    try:
+        sheet_name = unquote(parts[0])
+        row_index = int(parts[1])
+        column_index = int(parts[2])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("decision_id contiene coordenadas inválidas") from exc
+
+    if not sheet_name or row_index < 1 or column_index < 1:
+        raise ValueError("decision_id contiene coordenadas inválidas")
+
+    return sheet_name, row_index, column_index
+
+
+def _target_base_for_default_action(default_action: str) -> str:
+    return "b" if default_action == "use_a" else "a"
+
+
+def _source_signature(diff: WorkbookDiff) -> str:
+    parts = [diff.options.compare_mode, str(diff.options.header_row)]
+    for workbook_path in (diff.workbook_a, diff.workbook_b):
+        if workbook_path:
+            path = Path(workbook_path)
+            stat = path.stat()
+            parts.extend([path.name, str(stat.st_size), str(stat.st_mtime_ns)])
+        else:
+            parts.append("<unknown>")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 def compare_workbooks(
     path_a: str | Path,
     path_b: str | Path,
@@ -465,6 +527,8 @@ def compare_workbooks(
         common_sheets=common,
         differences=differences,
         options=options,
+        workbook_a=str(path_a),
+        workbook_b=str(path_b),
     )
 
 
@@ -485,6 +549,7 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
     for diff in diffs:
         rows.append(
             {
+                "decision_id": build_decision_id(diff),
                 "sheet": diff.sheet,
                 "cell": diff.coordinate,
                 "row": diff.row,
@@ -505,6 +570,55 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
     return pd.DataFrame(rows, columns=DECISION_COLUMNS)
 
 
+def _write_metadata_sheet(wb: Workbook, diff: WorkbookDiff, default_action: str) -> None:
+    metadata = wb.create_sheet(DECISION_METADATA_SHEET_NAME)
+    metadata.sheet_state = "hidden"
+    metadata.append(["key", "value"])
+    metadata_rows = [
+        ("format_version", DECISION_FORMAT_VERSION),
+        ("compare_mode", diff.options.compare_mode),
+        ("base_workbook", _target_base_for_default_action(default_action)),
+        ("generated_at", datetime.now(timezone.utc).isoformat()),
+        ("source_signature", _source_signature(diff)),
+        ("workbook_a", Path(diff.workbook_a).name if diff.workbook_a else None),
+        ("workbook_b", Path(diff.workbook_b).name if diff.workbook_b else None),
+    ]
+    for key, value in metadata_rows:
+        metadata.append([key, value])
+
+
+
+def _add_decision_table(ws: Worksheet) -> None:
+    if ws.max_row < 2:
+        return
+
+    last_column = column_letter(ws.max_column)
+    table = Table(displayName="DecisionTable", ref=f"A1:{last_column}{ws.max_row}")
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+
+
+def _protect_decision_sheet(ws: Worksheet) -> None:
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in row:
+            header = str(ws.cell(row=1, column=cell.column).value)
+            cell.protection = Protection(locked=header not in EDITABLE_DECISION_COLUMNS)
+
+    ws.protection.sheet = True
+    ws.protection.autoFilter = True
+    ws.protection.sort = True
+    ws.protection.selectLockedCells = True
+    ws.protection.selectUnlockedCells = True
+
+
+
 def _style_decision_sheet(ws: Worksheet) -> None:
     for cell in ws[1]:
         cell.fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
@@ -516,6 +630,9 @@ def _style_decision_sheet(ws: Worksheet) -> None:
         action_column = DECISION_COLUMNS.index("action") + 1
         dv.add(f"{column_letter(action_column)}2:{column_letter(action_column)}{ws.max_row}")
     ws.freeze_panes = "A2"
+    _add_decision_table(ws)
+    _protect_decision_sheet(ws)
+
 
 
 def export_decision_template(
@@ -546,6 +663,7 @@ def export_decision_template(
         ws.append(list(row))
 
     _style_decision_sheet(ws)
+    _write_metadata_sheet(wb, diff, default_action)
 
     summary = wb.create_sheet("Resumen")
     summary.append(["Métrica", "Valor"])
@@ -571,10 +689,12 @@ def _empty_decisions_dataframe() -> pd.DataFrame:
     return pd.DataFrame(columns=DECISION_COLUMNS)
 
 
+
 def _coerce_reviewed(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "sí", "si", "yes", "x"}
+
 
 
 def decisions_from_excel(path: str | Path, sheet_name: str = DECISION_SHEET_NAME) -> pd.DataFrame:
@@ -598,29 +718,15 @@ def decisions_from_excel(path: str | Path, sheet_name: str = DECISION_SHEET_NAME
     headers = [str(header) if header is not None else "" for header in rows[0]]
     data = rows[1:]
     df = pd.DataFrame(data, columns=headers)
+    return validate_decisions_dataframe(df)
 
-    for column in DECISION_COLUMNS:
-        if column not in df.columns:
-            df[column] = None
-
-    if "action" not in df.columns:
-        raise ValueError("La hoja de decisiones debe contener la columna 'action'")
-
-    df = df[DECISION_COLUMNS].copy()
-    df["action"] = df["action"].fillna(DEFAULT_ACTION).astype(str).str.strip()
-    df["reviewed"] = df["reviewed"].map(_coerce_reviewed).fillna(False)
-
-    invalid = sorted(set(df.loc[~df["action"].isin(VALID_ACTIONS), "action"].tolist()))
-    if invalid:
-        raise ValueError(f"Acciones no válidas: {invalid}. Válidas: {sorted(VALID_ACTIONS)}")
-
-    return df
 
 
 def _resolve_direction(base: WorkbookSide) -> tuple[WorkbookSide, WorkbookSide]:
     if base not in {"a", "b"}:
         raise ValueError("base debe ser 'a' o 'b'")
     return ("a", "b") if base == "a" else ("b", "a")
+
 
 
 def source_action_for_base(base: WorkbookSide) -> str:
@@ -630,27 +736,116 @@ def source_action_for_base(base: WorkbookSide) -> str:
     return f"use_{source_key}"
 
 
+
 def validate_decisions_dataframe(decisions: pd.DataFrame) -> pd.DataFrame:
     """Valida y normaliza el DataFrame de decisiones esperado por el motor."""
 
-    missing = [column for column in ("sheet", "row", "column", "action") if column not in decisions.columns]
+    missing = [column for column in DECISION_COLUMNS if column not in decisions.columns]
     if missing:
         raise ValueError(f"El DataFrame de decisiones no contiene columnas requeridas: {missing}")
 
-    normalized = decisions.copy()
-    for column in DECISION_COLUMNS:
-        if column not in normalized.columns:
-            normalized[column] = None
-
-    normalized = normalized[DECISION_COLUMNS].copy()
+    normalized = decisions[DECISION_COLUMNS].copy()
+    normalized["decision_id"] = normalized["decision_id"].fillna("").astype(str).str.strip()
     normalized["action"] = normalized["action"].fillna(DEFAULT_ACTION).astype(str).str.strip()
     normalized["reviewed"] = normalized["reviewed"].map(_coerce_reviewed).fillna(False)
 
-    invalid = sorted(set(normalized.loc[~normalized["action"].isin(VALID_ACTIONS), "action"].tolist()))
-    if invalid:
-        raise ValueError(f"Acciones no válidas: {invalid}. Válidas: {sorted(VALID_ACTIONS)}")
+    for column in ("sheet", "cell", "column_letter", "context", "header", "key", "diff_type"):
+        normalized[column] = normalized[column].where(normalized[column].notna(), None)
 
+    invalid_actions = sorted(set(normalized.loc[~normalized["action"].isin(VALID_ACTIONS), "action"].tolist()))
+    if invalid_actions:
+        raise ValueError(f"Acciones no válidas: {invalid_actions}. Válidas: {sorted(VALID_ACTIONS)}")
+
+    duplicate_ids = sorted(
+        set(normalized.loc[normalized["decision_id"].ne("") & normalized["decision_id"].duplicated(), "decision_id"].tolist())
+    )
+    if duplicate_ids:
+        raise ValueError(f"decision_id duplicados: {duplicate_ids}")
+
+    raw_row_values = normalized["row"].copy()
+    raw_column_values = normalized["column"].copy()
+    normalized["row"] = pd.to_numeric(normalized["row"], errors="coerce")
+    normalized["column"] = pd.to_numeric(normalized["column"], errors="coerce")
+
+    invalid_types: list[str] = []
+    orphan_rows: list[int] = []
+
+    for index, row in normalized.iterrows():
+        parsed_from_id: tuple[str, int, int] | None = None
+        decision_id = row["decision_id"]
+
+        if decision_id:
+            try:
+                parsed_from_id = _parse_decision_id(decision_id)
+            except ValueError:
+                invalid_types.append(f"Fila {index + 2}: decision_id inválido")
+                continue
+
+        row_value = row["row"]
+        column_value = row["column"]
+        row_has_value = pd.notna(row_value)
+        column_has_value = pd.notna(column_value)
+        raw_row_value = raw_row_values.iloc[index]
+        raw_column_value = raw_column_values.iloc[index]
+
+        row_was_provided = pd.notna(raw_row_value) and str(raw_row_value).strip() != ""
+        column_was_provided = pd.notna(raw_column_value) and str(raw_column_value).strip() != ""
+
+        if row_was_provided and not row_has_value:
+            invalid_types.append(f"Fila {index + 2}: row debe ser un entero")
+            continue
+        if column_was_provided and not column_has_value:
+            invalid_types.append(f"Fila {index + 2}: column debe ser un entero")
+            continue
+
+        if row_has_value and float(row_value) != int(row_value):
+            invalid_types.append(f"Fila {index + 2}: row debe ser un entero")
+            continue
+        if column_has_value and float(column_value) != int(column_value):
+            invalid_types.append(f"Fila {index + 2}: column debe ser un entero")
+            continue
+        if row_has_value and int(row_value) < 1:
+            invalid_types.append(f"Fila {index + 2}: row debe ser >= 1")
+            continue
+        if column_has_value and int(column_value) < 1:
+            invalid_types.append(f"Fila {index + 2}: column debe ser >= 1")
+            continue
+
+        has_coordinates = bool(row["sheet"]) and row_has_value and column_has_value
+
+        if parsed_from_id and has_coordinates:
+            expected_sheet, expected_row, expected_column = parsed_from_id
+            if str(row["sheet"]) != expected_sheet or int(row_value) != expected_row or int(column_value) != expected_column:
+                orphan_rows.append(index + 2)
+                continue
+
+        if not has_coordinates:
+            if not parsed_from_id:
+                orphan_rows.append(index + 2)
+                continue
+            normalized.at[index, "sheet"] = parsed_from_id[0]
+            normalized.at[index, "row"] = parsed_from_id[1]
+            normalized.at[index, "column"] = parsed_from_id[2]
+
+        row_index = int(normalized.at[index, "row"])
+        column_index = int(normalized.at[index, "column"])
+        coordinate = f"{column_letter(column_index)}{row_index}"
+        normalized.at[index, "cell"] = normalized.at[index, "cell"] or coordinate
+        normalized.at[index, "column_letter"] = normalized.at[index, "column_letter"] or column_letter(column_index)
+        normalized.at[index, "context"] = normalized.at[index, "context"] or (
+            f"{normalized.at[index, 'sheet']}!{coordinate} · fila {row_index} · columna {column_letter(column_index)} ({column_index})"
+        )
+
+    if invalid_types:
+        raise ValueError(f"Tipos inválidos en decisiones: {invalid_types}")
+
+    if orphan_rows:
+        raise ValueError(f"Filas huérfanas o inconsistentes en decisiones: {orphan_rows}")
+
+    normalized["row"] = normalized["row"].astype(int)
+    normalized["column"] = normalized["column"].astype(int)
     return normalized
+
 
 
 def apply_decisions(
@@ -680,6 +875,7 @@ def apply_decisions(
     wb_a = load_workbook(workbook_a)
     wb_b = load_workbook(workbook_b)
     workbooks = {"a": wb_a, "b": wb_b}
+    wb_source = workbooks[source_key]
 
     for _, row in normalized_decisions.iterrows():
         sheet_name = str(row["sheet"])
@@ -705,7 +901,6 @@ def apply_decisions(
         ws_out.cell(row=row_index, column=column_index).value = row.get("manual_value")
 
     if include_sheets_from_source_only:
-        wb_source = workbooks[source_key]
         for sheet in wb_source.sheetnames:
             if sheet in wb_out.sheetnames:
                 continue
@@ -726,6 +921,8 @@ __all__ = [
     "ComparisonRequest",
     "ComparatorService",
     "DECISION_COLUMNS",
+    "DECISION_FORMAT_VERSION",
+    "DECISION_METADATA_SHEET_NAME",
     "DECISION_SHEET_NAME",
     "DEFAULT_ACTION",
     "DecisionTemplateRequest",
@@ -737,6 +934,7 @@ __all__ = [
     "WorkbookDiff",
     "WorkbookSide",
     "apply_decisions",
+    "build_decision_id",
     "column_letter",
     "compare_workbooks",
     "decisions_from_excel",

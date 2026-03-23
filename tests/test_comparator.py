@@ -1,11 +1,15 @@
 from pathlib import Path
 
+import pandas as pd
+import pytest
 from openpyxl import Workbook, load_workbook
 
 from comparator import (
     CompareOptions,
     ComparisonRequest,
     DECISION_COLUMNS,
+    DECISION_FORMAT_VERSION,
+    DECISION_METADATA_SHEET_NAME,
     MergeRequest,
     SERVICE,
     apply_decisions,
@@ -27,6 +31,7 @@ def _create_wb(path: Path, sheets: dict[str, dict[str, object]]):
         for coord, value in cells.items():
             ws[coord] = value
     wb.save(path)
+
 
 
 def test_compare_workbooks_detects_sheet_and_cell_differences(tmp_path: Path):
@@ -57,6 +62,7 @@ def test_compare_workbooks_detects_sheet_and_cell_differences(tmp_path: Path):
     assert diff.differences["Resumen"][0].coordinate == "B2"
 
 
+
 def test_compare_options_ignore_case_and_spaces(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
@@ -73,6 +79,7 @@ def test_compare_options_ignore_case_and_spaces(tmp_path: Path):
         options=CompareOptions(strip_strings=True, case_sensitive=False),
     )
     assert relaxed_diff.all_differences() == []
+
 
 
 def test_compare_workbooks_row_based_avoids_cascade_and_detects_row_states(tmp_path: Path):
@@ -136,7 +143,8 @@ def test_compare_workbooks_row_based_avoids_cascade_and_detects_row_states(tmp_p
     assert {diff.key for diff in added} == {"ID=3"}
 
 
-def test_diffs_to_dataframe_exposes_stable_contract_columns(tmp_path: Path):
+
+def test_diffs_to_dataframe_exposes_stable_contract_columns_and_decision_ids(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
 
@@ -148,6 +156,8 @@ def test_diffs_to_dataframe_exposes_stable_contract_columns(tmp_path: Path):
 
     assert list(df.columns) == DECISION_COLUMNS
     assert df.iloc[0]["diff_type"] == "modified"
+    assert df.iloc[0]["decision_id"].startswith("Datos|1|1|")
+
 
 
 def test_apply_decisions_merges_changes(tmp_path: Path):
@@ -187,6 +197,7 @@ def test_apply_decisions_merges_changes_from_a_onto_b(tmp_path: Path):
     assert wb["NuevaA"]["A1"].value == 42
 
 
+
 def test_export_and_read_decisions_template(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
@@ -203,6 +214,129 @@ def test_export_and_read_decisions_template(tmp_path: Path):
     assert loaded.iloc[0]["action"] == "use_b"
     assert loaded.iloc[0]["sheet"] == "Datos"
     assert loaded.iloc[0]["diff_type"] == "modified"
+    assert loaded.iloc[0]["decision_id"].startswith("Datos|1|1|")
+
+
+
+def test_export_template_protects_structure_adds_table_and_metadata(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    template = tmp_path / "decisiones.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "base"}})
+    _create_wb(b, {"Datos": {"A1": "cambio"}})
+
+    diff = compare_workbooks(a, b)
+    export_decision_template(diff, template, default_action="use_b")
+
+    wb = load_workbook(template)
+    ws = wb["Decisiones"]
+    metadata = wb[DECISION_METADATA_SHEET_NAME]
+
+    decision_id_col = DECISION_COLUMNS.index("decision_id") + 1
+    action_col = DECISION_COLUMNS.index("action") + 1
+    manual_col = DECISION_COLUMNS.index("manual_value") + 1
+    reviewed_col = DECISION_COLUMNS.index("reviewed") + 1
+
+    assert ws.protection.sheet is True
+    assert ws.cell(row=2, column=decision_id_col).protection.locked is True
+    assert ws.cell(row=2, column=action_col).protection.locked is False
+    assert ws.cell(row=2, column=manual_col).protection.locked is False
+    assert ws.cell(row=2, column=reviewed_col).protection.locked is False
+    assert len(ws.tables) == 1
+    assert "DecisionTable" in ws.tables
+    assert metadata.sheet_state == "hidden"
+
+    metadata_values = {row[0]: row[1] for row in metadata.iter_rows(min_row=2, values_only=True)}
+    assert metadata_values["format_version"] == DECISION_FORMAT_VERSION
+    assert metadata_values["compare_mode"] == "coordinate"
+    assert metadata_values["base_workbook"] == "a"
+    assert metadata_values["workbook_a"] == "a.xlsx"
+    assert metadata_values["workbook_b"] == "b.xlsx"
+    assert metadata_values["source_signature"]
+    assert metadata_values["generated_at"]
+
+
+
+def test_decisions_validation_supports_decision_id_without_coordinates(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    output = tmp_path / "out.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "base"}})
+    _create_wb(b, {"Datos": {"A1": "source"}})
+
+    diff = compare_workbooks(a, b)
+    df = diffs_to_dataframe(diff.all_differences(), default_action="use_b")
+    df.loc[0, ["sheet", "row", "column", "cell", "column_letter", "context"]] = [None, None, None, None, None, None]
+
+    apply_decisions(a, df, output, b, base="a")
+
+    wb = load_workbook(output)
+    assert wb["Datos"]["A1"].value == "source"
+
+
+
+def test_decisions_from_excel_detects_deleted_columns(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+    template = tmp_path / "decisiones.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "x"}})
+    _create_wb(b, {"Datos": {"A1": "y"}})
+
+    diff = compare_workbooks(a, b)
+    export_decision_template(diff, template)
+
+    wb = load_workbook(template)
+    ws = wb["Decisiones"]
+    ws.delete_cols(1)
+    wb.save(template)
+
+    with pytest.raises(ValueError, match="columnas requeridas"):
+        decisions_from_excel(template)
+
+
+
+def test_validate_decisions_dataframe_rejects_invalid_actions():
+    invalid = diffs_to_dataframe([])
+    invalid.loc[0] = [None] * len(DECISION_COLUMNS)
+    invalid.loc[0, "decision_id"] = "Datos|1|1|abcdef123456"
+    invalid.loc[0, "sheet"] = "Datos"
+    invalid.loc[0, "row"] = 1
+    invalid.loc[0, "column"] = 1
+    invalid.loc[0, "action"] = "romper"
+
+    with pytest.raises(ValueError, match="Acciones no válidas"):
+        validate_decisions_dataframe(invalid)
+
+
+
+def test_validate_decisions_dataframe_rejects_invalid_types_duplicate_ids_and_orphans(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "x", "A2": "base"}})
+    _create_wb(b, {"Datos": {"A1": "y", "A2": "source"}})
+
+    diff = compare_workbooks(a, b)
+    df = diffs_to_dataframe(diff.all_differences())
+
+    duplicate = pd.concat([df.iloc[[0]], df.iloc[[0]]], ignore_index=True)
+    with pytest.raises(ValueError, match="decision_id duplicados"):
+        validate_decisions_dataframe(duplicate)
+
+    invalid_type = df.copy()
+    invalid_type["row"] = invalid_type["row"].astype(object)
+    invalid_type.loc[0, "row"] = "fila-uno"
+    with pytest.raises(ValueError, match="Tipos inválidos"):
+        validate_decisions_dataframe(invalid_type)
+
+    orphan = df.copy()
+    orphan.loc[0, "sheet"] = "OtraHoja"
+    with pytest.raises(ValueError, match="Filas huérfanas"):
+        validate_decisions_dataframe(orphan)
+
 
 
 def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):
@@ -228,21 +362,6 @@ def test_service_api_supports_compare_and_merge_requests(tmp_path: Path):
     wb = load_workbook(result)
     assert wb["Datos"]["A1"].value == "source"
 
-
-def test_validate_decisions_dataframe_rejects_invalid_actions():
-    invalid = diffs_to_dataframe([])
-    invalid.loc[0] = [None] * len(DECISION_COLUMNS)
-    invalid.loc[0, "sheet"] = "Datos"
-    invalid.loc[0, "row"] = 1
-    invalid.loc[0, "column"] = 1
-    invalid.loc[0, "action"] = "romper"
-
-    try:
-        validate_decisions_dataframe(invalid)
-    except ValueError as exc:
-        assert "Acciones no válidas" in str(exc)
-    else:
-        raise AssertionError("Se esperaba ValueError por acción inválida")
 
 
 def test_interface_adapter_parsers_and_option_builder():
