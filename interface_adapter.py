@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
 import pandas as pd
 
+from adapter_models import MergeDescriptor
 from comparator import (
     CompareOptions,
     ComparisonRequest,
@@ -17,13 +17,6 @@ from comparator import (
     WorkbookSide,
     source_action_for_base,
 )
-
-
-@dataclass(frozen=True)
-class MergeLabels:
-    base: str
-    source: str
-    base_key: WorkbookSide
 
 
 def parse_sheet_keys(raw_entries: Iterable[str], *, item_separator: str) -> dict[str, list[str]]:
@@ -42,14 +35,6 @@ def parse_sheet_keys(raw_entries: Iterable[str], *, item_separator: str) -> dict
             raise ValueError("Cada entrada debe incluir nombre de hoja y al menos una columna clave")
         sheet_keys[sheet_name.strip()] = columns
     return sheet_keys
-
-
-def parse_sheet_keys_block(raw_value: str) -> dict[str, list[str]]:
-    return parse_sheet_keys(raw_value.splitlines(), item_separator=":")
-
-
-def parse_sheet_keys_args(values: list[str] | None) -> dict[str, list[str]]:
-    return parse_sheet_keys(values or [], item_separator="=")
 
 
 def build_compare_options(
@@ -75,35 +60,20 @@ def compare_files(path_a: str | Path, path_b: str | Path, options: CompareOption
     return SERVICE.compare(ComparisonRequest(path_a=path_a, path_b=path_b, options=options))
 
 
-def default_action_for_base(base: WorkbookSide) -> str:
-    return source_action_for_base(base)
-
-
-def merge_labels(base: WorkbookSide) -> MergeLabels:
-    if base == "a":
-        return MergeLabels(base="A", source="B", base_key="a")
-    return MergeLabels(base="B", source="A", base_key="b")
-
-
-def build_review_dataframe(diff: WorkbookDiff, *, default_action: str) -> pd.DataFrame:
-    decisions_df = diff.to_dataframe(default_action=default_action)
-    if decisions_df.empty:
-        return decisions_df
-
-    decisions_df = decisions_df.copy()
-    decisions_df["value_a_display"] = decisions_df["value_a"].map(format_display_value)
-    decisions_df["value_b_display"] = decisions_df["value_b"].map(format_display_value)
-    decisions_df["preview"] = decisions_df.apply(
-        lambda row: f"🅰️ {row['value_a_display']} ⟶ 🅱️ {row['value_b_display']}",
-        axis=1,
+def describe_merge(base: WorkbookSide) -> MergeDescriptor:
+    source_key: WorkbookSide = "b" if base == "a" else "a"
+    return MergeDescriptor(
+        base_key=base,
+        source_key=source_key,
+        base_label=base.upper(),
+        source_label=source_key.upper(),
+        default_action=source_action_for_base(base),
     )
-    return decisions_df
 
 
-def export_template(diff: WorkbookDiff, output_path: str | Path, *, base: WorkbookSide, default_action: str | None = None) -> Path:
-    action = default_action or default_action_for_base(base)
+def export_template(diff: WorkbookDiff, output_path: str | Path, *, default_action: str) -> Path:
     return SERVICE.export_decision_template(
-        DecisionTemplateRequest(diff=diff, output_path=output_path, default_action=action)
+        DecisionTemplateRequest(diff=diff, output_path=output_path, default_action=default_action)
     )
 
 
@@ -130,11 +100,3 @@ def merge_workbooks(
             include_sheets_from_source_only=include_sheets_from_source_only,
         )
     )
-
-
-def format_display_value(value: object) -> str:
-    if value is None:
-        return "∅"
-    if value == "":
-        return "''"
-    return str(value)

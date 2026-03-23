@@ -490,7 +490,7 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
                 "row": diff.row,
                 "column": diff.column,
                 "column_letter": column_letter(diff.column),
-                "context": f"{diff.sheet}!{diff.coordinate} · fila {diff.row} · columna {column_letter(diff.column)} ({diff.column})",
+                "context": f"{diff.sheet}!{diff.coordinate}",
                 "header": diff.header,
                 "key": diff.key,
                 "diff_type": diff.diff_type,
@@ -680,6 +680,7 @@ def apply_decisions(
     wb_a = load_workbook(workbook_a)
     wb_b = load_workbook(workbook_b)
     workbooks = {"a": wb_a, "b": wb_b}
+    wb_source = workbooks[source_key]
 
     for _, row in normalized_decisions.iterrows():
         sheet_name = str(row["sheet"])

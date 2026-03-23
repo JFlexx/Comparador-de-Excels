@@ -16,7 +16,9 @@ from comparator import (
     source_action_for_base,
     validate_decisions_dataframe,
 )
-from interface_adapter import build_compare_options, parse_sheet_keys_args, parse_sheet_keys_block
+from cli_adapter import parse_sheet_keys_args
+from interface_adapter import build_compare_options
+from streamlit_adapter import build_review_table, parse_sheet_keys_block
 
 
 def _create_wb(path: Path, sheets: dict[str, dict[str, object]]):
@@ -243,6 +245,22 @@ def test_validate_decisions_dataframe_rejects_invalid_actions():
         assert "Acciones no válidas" in str(exc)
     else:
         raise AssertionError("Se esperaba ValueError por acción inválida")
+
+
+
+def test_streamlit_adapter_builds_review_table_without_business_logic_changes(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(a, {"Datos": {"A1": "x", "A2": None}})
+    _create_wb(b, {"Datos": {"A1": "y", "A2": ""}})
+
+    diff = compare_workbooks(a, b)
+    review_table = build_review_table(diff, default_action="use_b")
+
+    assert tuple(review_table.editable_columns) == ("action", "manual_value", "reviewed")
+    assert "preview" in review_table.dataframe.columns
+    assert review_table.dataframe.iloc[0]["preview"] == "A: x -> B: y"
 
 
 def test_interface_adapter_parsers_and_option_builder():
