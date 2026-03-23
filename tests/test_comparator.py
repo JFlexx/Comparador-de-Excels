@@ -68,7 +68,68 @@ def test_compare_options_ignore_case_and_spaces(tmp_path: Path):
     assert relaxed_diff.all_differences() == []
 
 
-def test_apply_decisions_merges_changes_from_b_onto_a(tmp_path: Path):
+def test_compare_workbooks_row_based_avoids_cascade_and_detects_row_states(tmp_path: Path):
+    a = tmp_path / "a.xlsx"
+    b = tmp_path / "b.xlsx"
+
+    _create_wb(
+        a,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "C1": "Estado",
+                "A2": 1,
+                "B2": "Ana",
+                "C2": "OK",
+                "A3": 2,
+                "B3": "Luis",
+                "C3": "OK",
+            }
+        },
+    )
+    _create_wb(
+        b,
+        {
+            "Datos": {
+                "A1": "ID",
+                "B1": "Nombre",
+                "C1": "Estado",
+                "A2": 1,
+                "B2": "Ana",
+                "C2": "Actualizado",
+                "A3": 3,
+                "B3": "Marta",
+                "C3": "Nueva",
+                "A4": 2,
+                "B4": "Luis",
+                "C4": "OK",
+            }
+        },
+    )
+
+    coordinate_diff = compare_workbooks(a, b)
+    assert len(coordinate_diff.all_differences()) == 6
+
+    row_diff = compare_workbooks(
+        a,
+        b,
+        options=CompareOptions(compare_mode="row-based", sheet_keys={"Datos": ["ID"]}),
+    )
+
+    row_diffs = row_diff.differences["Datos"]
+    assert len(row_diffs) == 4
+    assert {diff.diff_type for diff in row_diffs} == {"modified", "added"}
+    modified = [diff for diff in row_diffs if diff.diff_type == "modified"]
+    added = [diff for diff in row_diffs if diff.diff_type == "added"]
+    assert len(modified) == 1
+    assert modified[0].header == "Estado"
+    assert modified[0].key == "ID=1"
+    assert {diff.header for diff in added} == {"ID", "Nombre", "Estado"}
+    assert {diff.key for diff in added} == {"ID=3"}
+
+
+def test_apply_decisions_merges_changes(tmp_path: Path):
     a = tmp_path / "a.xlsx"
     b = tmp_path / "b.xlsx"
 
@@ -120,3 +181,4 @@ def test_export_and_read_decisions_template(tmp_path: Path):
     assert loaded.shape[0] == 1
     assert loaded.iloc[0]["action"] == "use_b"
     assert loaded.iloc[0]["sheet"] == "Datos"
+    assert loaded.iloc[0]["diff_type"] == "modified"
