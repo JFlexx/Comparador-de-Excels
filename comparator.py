@@ -11,9 +11,23 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
 
+WorkbookSide = Literal["a", "b"]
+
 DEFAULT_ACTION = "use_b"
 VALID_ACTIONS = {"use_a", "use_b", "manual"}
 VALID_COMPARE_MODES = {"coordinate", "row-based"}
+
+
+def _resolve_direction(base: WorkbookSide) -> tuple[WorkbookSide, WorkbookSide]:
+    if base not in {"a", "b"}:
+        raise ValueError("base debe ser 'a' o 'b'")
+    source: WorkbookSide = "b" if base == "a" else "a"
+    return base, source
+
+
+def source_action_for_base(base: WorkbookSide) -> str:
+    _, source = _resolve_direction(base)
+    return f"use_{source}"
 
 
 def column_letter(column: int) -> str:
@@ -348,6 +362,9 @@ def diffs_to_dataframe(diffs: Iterable[CellDiff], default_action: str = DEFAULT_
                 "context": f"{d.sheet}!{d.coordinate} · fila {d.row} · columna {column_letter(d.column)} ({d.column})",
                 "value_a": d.value_a,
                 "value_b": d.value_b,
+                "header": d.header,
+                "key": d.key,
+                "diff_type": d.diff_type,
                 "action": default_action,
                 "manual_value": None,
                 "reviewed": False,
@@ -378,6 +395,9 @@ def export_decision_template(
         "context",
         "value_a",
         "value_b",
+        "header",
+        "key",
+        "diff_type",
         "action",
         "manual_value",
         "reviewed",
@@ -395,7 +415,7 @@ def export_decision_template(
     dv = DataValidation(type="list", formula1='"use_a,use_b,manual"', allow_blank=False)
     ws.add_data_validation(dv)
     if ws.max_row >= 2:
-        dv.add(f"I2:I{ws.max_row}")
+        dv.add(f"L2:L{ws.max_row}")
 
     ws.freeze_panes = "A2"
 
@@ -436,6 +456,9 @@ def decisions_from_excel(path: str | Path, sheet_name: str = "Decisiones") -> pd
                 "context",
                 "value_a",
                 "value_b",
+                "header",
+                "key",
+                "diff_type",
                 "action",
                 "manual_value",
                 "reviewed",
@@ -445,8 +468,14 @@ def decisions_from_excel(path: str | Path, sheet_name: str = "Decisiones") -> pd
     headers = [str(h) if h is not None else "" for h in rows[0]]
     data = rows[1:]
     df = pd.DataFrame(data, columns=headers)
-    if "action" not in df.columns:
-        raise ValueError("La hoja de decisiones debe contener la columna 'action'")
+    required_columns = {"sheet", "row", "column", "action"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise ValueError(f"La hoja de decisiones debe contener las columnas {sorted(required_columns)}")
+
+    for optional_column in ("header", "key", "diff_type", "manual_value", "reviewed"):
+        if optional_column not in df.columns:
+            df[optional_column] = None
 
     if "reviewed" not in df.columns:
         df["reviewed"] = False
@@ -476,7 +505,9 @@ def apply_decisions(
     workbook_paths = {"a": workbook_a, "b": workbook_b}
 
     wb_out = load_workbook(workbook_paths[base_key])
-    wb_source = load_workbook(workbook_paths[source_key])
+    wb_a = load_workbook(workbook_a)
+    wb_b = load_workbook(workbook_b)
+    workbooks = {"a": wb_a, "b": wb_b}
 
     for _, row in decisions.iterrows():
         sheet_name = row["sheet"]
@@ -490,13 +521,16 @@ def apply_decisions(
 
         if action == f"use_{base_key}":
             continue
-        if action == f"use_{source_key}":
+        if action in {"use_a", "use_b"}:
+            action_side = action[-1]
+            wb_source = workbooks[action_side]
             if sheet_name in wb_source.sheetnames:
                 ws_out.cell(row=r, column=c).value = wb_source[sheet_name].cell(row=r, column=c).value
         elif action == "manual":
             ws_out.cell(row=r, column=c).value = row.get("manual_value")
 
     if include_sheets_from_source_only:
+        wb_source = workbooks[source_key]
         for sheet in wb_source.sheetnames:
             if sheet not in wb_out.sheetnames:
                 src = wb_source[sheet]

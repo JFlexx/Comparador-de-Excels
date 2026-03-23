@@ -109,7 +109,7 @@ def test_compare_workbooks_row_based_avoids_cascade_and_detects_row_states(tmp_p
     )
 
     coordinate_diff = compare_workbooks(a, b)
-    assert len(coordinate_diff.all_differences()) == 6
+    assert len(coordinate_diff.all_differences()) == 7
 
     row_diff = compare_workbooks(
         a,
@@ -137,7 +137,7 @@ def test_apply_decisions_merges_changes(tmp_path: Path):
     _create_wb(b, {"Datos": {"A1": "hola", "A2": "nuevo"}, "Nueva": {"A1": 99}})
 
     diff = compare_workbooks(a, b)
-    df = diffs_to_dataframe(diff.all_differences())
+    df = diffs_to_dataframe(diff.all_differences(), default_action="use_b")
 
     output = tmp_path / "out.xlsx"
     apply_decisions(a, df, output, b, base="a")
@@ -156,7 +156,7 @@ def test_apply_decisions_merges_changes_from_a_onto_b(tmp_path: Path):
     _create_wb(b, {"Datos": {"A1": "hola", "A2": "base"}})
 
     diff = compare_workbooks(a, b)
-    df = diffs_to_dataframe(diff.all_differences())
+    df = diffs_to_dataframe(diff.all_differences(), default_action="use_a")
 
     output = tmp_path / "out_b.xlsx"
     apply_decisions(a, df, output, b, base="b")
